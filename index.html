@@ -14,14 +14,16 @@
     .row input:not([type]) { flex: 1; min-width: 8rem; }
     .chat { height: 14rem; overflow-y: auto; border: 1px solid #8886; padding: .3rem; border-radius: 4px; }
     .msg .ts { opacity: .5; font-size: .8em; } .msg.sys { opacity: .65; font-style: italic; }
-    .log { height: 9rem; overflow-y: auto; font-size: .78rem; background: #8881; padding: .3rem; margin: 0; white-space: pre-wrap; }
+    .log { height: 18rem; overflow-y: auto; font-size: .78rem; background: #8881; padding: .3rem; margin: 0; white-space: pre-wrap; }
     .status { font-weight: 600; } .muted { opacity: .65; font-size: .9em; }
+    footer { margin: 2rem 0 1rem; text-align: center; border-top: 1px solid #8884; padding-top: .5rem; }
     .tag { font-size: .75em; border: 1px solid #8888; border-radius: 3px; padding: 0 .3em; margin-left: .3em; }
   </style>
 </head>
 <body>
   <h1>VTTRPG &ndash; Skeleton (concept test)</h1>
   <div id="app">Loading&hellip; (if this stays, check the browser console)</div>
+  <footer id="version" class="muted">VTTRPG skeleton (version loads with the script)</footer>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

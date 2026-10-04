@@ -1,9 +1,26 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via Trystero.
 // The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
 
-// ---------- networking layer (the only place that knows about Trystero) ----------
+const APP_VERSION = '0.3.0';
 const APP_ID = 'vttrpg-skeleton-v2';              // namespace for the signaling relays (not secret)
 const TRYSTERO_VERSION = '0.26.0';                // pinned: the API changed a lot between releases
+
+// ---------- global diagnostics: forward warnings/errors/online state into the visible log ----------
+let activeLog = null;                              // set by the current view's log()
+const safeStr = x => { try { return typeof x === 'string' ? x : (x?.message || JSON.stringify(x)); } catch { return String(x); } };
+for (const lvl of ['warn', 'error']) {
+  const orig = console[lvl].bind(console);
+  console[lvl] = (...a) => { orig(...a); try { activeLog?.(`console.${lvl}: ` + a.map(safeStr).join(' ').slice(0, 400)); } catch { } };
+}
+addEventListener('error', e => activeLog?.('window error: ' + e.message));
+addEventListener('unhandledrejection', e => activeLog?.('unhandled rejection: ' + safeStr(e.reason)));
+addEventListener('online', () => activeLog?.('browser went ONLINE'));
+addEventListener('offline', () => activeLog?.('browser went OFFLINE'));
+document.addEventListener('visibilitychange', () => activeLog?.('tab is now ' + document.visibilityState));
+const footer = document.getElementById('version');
+if (footer) footer.textContent = `VTTRPG skeleton v${APP_VERSION} · Trystero ${TRYSTERO_VERSION}`;
+
+// ---------- networking layer (the only place that knows about Trystero) ----------
 const STRATEGIES = {                              // how peers find each other (signaling only, no game data)
   mqtt:    { pkg: '@trystero-p2p/mqtt',    label: 'MQTT brokers (default)' },
   torrent: { pkg: '@trystero-p2p/torrent', label: 'BitTorrent trackers' },
@@ -11,47 +28,92 @@ const STRATEGIES = {                              // how peers find each other (
 };
 const DEFAULT_STRATEGY = 'mqtt';
 const CDNS = [pkgAtVer => `https://esm.run/${pkgAtVer}`, pkgAtVer => `https://esm.sh/${pkgAtVer}`];
+const short = id => String(id).slice(0, 6);
 
 async function loadStrategy(name, log) {
   const pkgAtVer = `${STRATEGIES[name].pkg}@${TRYSTERO_VERSION}`;
   for (const mk of CDNS) {
-    const url = mk(pkgAtVer);
-    try { const mod = await import(url); log(`library loaded: ${url}`); return mod; }
-    catch (e) { log(`library load FAILED: ${url} (${e.message})`); }
+    const url = mk(pkgAtVer), t = performance.now();
+    log(`loading library: ${url}`);
+    try { const mod = await import(url); log(`library loaded in ${Math.round(performance.now() - t)} ms`); return mod; }
+    catch (e) { log(`library load FAILED after ${Math.round(performance.now() - t)} ms: ${e.message}`); }
   }
   throw new Error('Could not load the networking library for strategy ' + name);
 }
 
-// Returns { send(data, targetPeerId?), leave() }
-async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage }) {
-  const mod = await loadStrategy(strategy, log);
-  log(`joining room via ${strategy}…`);
-  const room = mod.joinRoom({ appId: APP_ID, password: secret }, roomId, {
-    onJoinError: d => log('JOIN ERROR: ' + JSON.stringify(d)),
-  });
-  const action = room.makeAction('msg');
-  room.onPeerJoin = onJoin;
-  room.onPeerLeave = onLeave;
-  action.onMessage = (data, meta) => onMessage(data, meta.peerId);
+async function candidateInfo(pc) {                // which network path is used? host/srflx = direct, relay = TURN
+  try {
+    const stats = await pc.getStats(); let pair;
+    stats.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId); });
+    if (!pair) stats.forEach(r => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+    if (!pair) return 'no selected pair yet';
+    const l = stats.get(pair.localCandidateId), r = stats.get(pair.remoteCandidateId);
+    return `local ${l?.candidateType}/${l?.protocol}  remote ${r?.candidateType}/${r?.protocol}`;
+  } catch (e) { return 'stats error: ' + e.message; }
+}
 
-  const timers = [];
+// Returns { send(data, targetPeerId?), leave(), status() }
+async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage }) {
+  const t0 = performance.now(), ms = () => Math.round(performance.now() - t0);
+  let tx = 0, rx = 0;
+  log(`env: online=${navigator.onLine} secureContext=${isSecureContext} RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'}`);
+  log(`browser: ${navigator.userAgent}`);
+  log(`strategy "${strategy}", Trystero ${TRYSTERO_VERSION}`);
+  const mod = await loadStrategy(strategy, log);
+  log(`library ready after ${ms()} ms (exports: ${Object.keys(mod).join(', ')})`);
+  log(`joining room ${short(roomId)}… appId=${APP_ID}, handshake encrypted with the link secret`);
+  const room = mod.joinRoom({ appId: APP_ID, password: secret }, roomId, {
+    onJoinError: d => log('JOIN ERROR: ' + safeStr(d)),
+  });
+  log(`joinRoom() returned after ${ms()} ms`);
+  const action = room.makeAction('msg');
+
   const relayStates = () => {
     try {
       const socks = mod.getRelaySockets?.() || {};
       const names = ['connecting', 'open', 'closing', 'closed'];
-      return Object.entries(socks).map(([u, s]) => {
+      const list = Object.entries(socks).map(([u, s]) => {
         const st = s.readyState !== undefined ? names[s.readyState] : (s.connected ? 'open' : 'not connected');
         return `${u.replace(/^wss?:\/\//, '')}=${st}`;
-      }).join('  ') || '(no relay sockets)';
+      });
+      return list.length ? list.join('  ') : '(no relay sockets)';
     } catch (e) { return 'relay state unavailable: ' + e.message; }
   };
-  [2000, 6000, 15000, 30000].forEach(ms => timers.push(setTimeout(() => log(`relays @${ms / 1000}s: ${relayStates()}`), ms)));
+  const peerStates = () => {
+    try {
+      const peers = room.getPeers?.() || {}, ids = Object.keys(peers);
+      if (!ids.length) return 'no peers connected';
+      return ids.map(id => { const pc = peers[id]; return `${short(id)}[conn=${pc?.connectionState},ice=${pc?.iceConnectionState}]`; }).join(' ');
+    } catch (e) { return 'peer state unavailable: ' + e.message; }
+  };
+  const status = () => `relays: ${relayStates()} | peers: ${peerStates()} | msgs sent=${tx} received=${rx} | up ${Math.round(ms() / 1000)}s`;
+
+  function watchPeer(pid) {
+    const pc = room.getPeers?.()[pid];
+    if (!pc?.addEventListener) { log(`(no RTCPeerConnection handle for ${short(pid)})`); return; }
+    for (const ev of ['connectionstatechange', 'iceconnectionstatechange'])
+      pc.addEventListener(ev, () => log(`${short(pid)} ${ev}: conn=${pc.connectionState} ice=${pc.iceConnectionState}`));
+    log(`${short(pid)} state: conn=${pc.connectionState} ice=${pc.iceConnectionState}`);
+    candidateInfo(pc).then(s => log(`${short(pid)} network path: ${s}`));
+    Promise.resolve(room.ping?.(pid)).then(t => log(`${short(pid)} ping ${Math.round(t)} ms`)).catch(e => log(`${short(pid)} ping failed: ${e.message}`));
+  }
+
+  room.onPeerJoin = pid => { log(`room: peer JOINED ${short(pid)} (after ${ms()} ms)`); watchPeer(pid); onJoin(pid); };
+  room.onPeerLeave = pid => { log(`room: peer LEFT ${short(pid)}`); onLeave(pid); };
+  action.onMessage = (data, meta) => { rx++; log(`← ${short(meta.peerId)} ${data?.t ?? typeof data}`); onMessage(data, meta.peerId); };
+
+  log('relays at join: ' + relayStates());
+  const timers = [];
+  [2000, 6000, 15000].forEach(t => timers.push(setTimeout(() => log(`status @${t / 1000}s: ${status()}`), t)));
+  timers.push(setInterval(() => log('status: ' + status()), 30000));
 
   return {
     send(data, target) {
-      Promise.resolve(action.send(data, target ? { target } : {})).catch(e => log('send failed: ' + e.message));
+      tx++; log(`→ ${target ? short(target) : 'all'} ${data?.t ?? typeof data}`);
+      Promise.resolve(action.send(data, target ? { target } : {})).catch(e => log('SEND FAILED: ' + e.message));
     },
-    leave() { timers.forEach(clearTimeout); try { room.leave(); } catch { } },
+    status() { log('status (manual): ' + status()); },
+    leave() { timers.forEach(t => { clearTimeout(t); clearInterval(t); }); log('leaving room'); try { room.leave(); } catch (e) { log('leave error: ' + e.message); } },
   };
 }
 
@@ -65,7 +127,6 @@ const rid = (n = 12) => {
   const a = new Uint8Array(n); crypto.getRandomValues(a);
   return [...a].map(b => (b % 36).toString(36)).join('');
 };
-const short = id => String(id).slice(0, 6);
 
 function h(tag, props = {}, ...kids) {
   const e = document.createElement(tag);
@@ -87,10 +148,20 @@ function saveCampaign(c) {
 function deleteCampaign(id) { const all = loadAll(); delete all[id]; localStorage.setItem(LS_CAMPAIGNS, JSON.stringify(all)); }
 
 // ---------- small UI parts ----------
-function makeLog() {
-  const el = h('pre', { class: 'log' });
-  const log = s => { el.textContent += `${new Date().toLocaleTimeString()}  ${s}\n`; el.scrollTop = el.scrollHeight; console.log('[vttrpg]', s); };
-  return { el, log };
+// Log box with toolbar: copy / clear / (optional) "log status now"
+function makeLog(role, onStatus) {
+  const pre = h('pre', { class: 'log' });
+  const log = s => {
+    pre.textContent += `${new Date().toISOString().slice(11, 23)}  ${s}\n`;
+    pre.scrollTop = pre.scrollHeight; console.log(`[vttrpg ${role}]`, s);
+  };
+  const toolbar = h('div', { class: 'row' },
+    onStatus ? h('button', { onclick: () => onStatus() }, 'Log status now') : null,
+    h('button', { onclick: async () => { try { await navigator.clipboard.writeText(`VTTRPG v${APP_VERSION} (${role})\n` + pre.textContent); log('log copied to clipboard'); } catch (e) { log('copy failed: ' + e.message); } } }, 'Copy log'),
+    h('button', { onclick: () => { pre.textContent = ''; } }, 'Clear'));
+  activeLog = log;
+  log(`VTTRPG v${APP_VERSION} ${role} view started; page ${location.pathname}`);
+  return { el: h('div', {}, toolbar, pre), log };
 }
 
 function makeChat(onSend) {
@@ -119,6 +190,7 @@ let cleanup = null;
 
 function route() {
   if (cleanup) { cleanup(); cleanup = null; }
+  activeLog = null;
   $app.replaceChildren();
   const hash = location.hash.replace(/^#/, '') || '/';
   let m;
@@ -164,7 +236,7 @@ function viewHome() {
     h('section', {}, h('h2', {}, 'Create campaign (you become the DM)'), h('div', { class: 'row' }, nameIn, h('button', { onclick: create }, 'Create'))),
     h('section', {}, h('h2', {}, 'Your campaigns (stored in this browser only)'), listEl,
       h('div', { class: 'muted' }, 'Import a campaign file: '), fileIn),
-    h('section', { class: 'muted' }, `Players: you do not need anything here. Just open the join link the DM sent you. (networking: Trystero ${TRYSTERO_VERSION})`)
+    h('section', { class: 'muted' }, 'Players: you do not need anything here. Just open the join link the DM sent you.')
   );
 }
 
@@ -173,14 +245,15 @@ function viewDM(cid) {
   const camp = loadAll()[cid];
   if (!camp) { location.hash = '#/'; return; }
   const save = () => saveCampaign(camp);
-  const { el: logEl, log } = makeLog();
+  const { el: logEl, log } = makeLog('DM', () => conn ? conn.status() : log('no active session'));
+  log(`campaign "${camp.name}" (${cid}) loaded from localStorage: ${Object.keys(camp.players).length} known players, ${camp.chat.length} chat messages`);
   const chat = makeChat(text => postChat({ from: 'DM', text }));
   camp.chat.slice(-100).forEach(chat.add);
 
   let conn = null, session = null, opening = false;
   const peers = new Map(); // peerId -> {token, name, status:'pending'|'approved', num}
 
-  const modeSel = h('select', { onchange: () => { if (session) { session.mode = modeSel.value; log('join mode -> ' + session.mode); } } },
+  const modeSel = h('select', { onchange: () => { if (session) { session.mode = modeSel.value; } log('join mode -> ' + modeSel.value); } },
     h('option', { value: 'approval' }, 'Approval required'),
     h('option', { value: 'open' }, 'Open (auto-approve)'),
     h('option', { value: 'locked' }, 'Locked (only known players)'));
@@ -188,7 +261,7 @@ function viewDM(cid) {
   stratSel.value = DEFAULT_STRATEGY;
   const toggleBtn = h('button', { onclick: () => session ? closeSession() : openSession() }, 'Open session');
   const linkIn = h('input', { readonly: '', placeholder: 'Open the session to get a link' });
-  const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); } }, 'Copy link');
+  const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); log('join link copied'); } }, 'Copy link');
   const lobbyEl = h('div'), playersEl = h('div');
   chat.setEnabled(false);
 
@@ -204,29 +277,31 @@ function viewDM(cid) {
     opening = true; toggleBtn.disabled = stratSel.disabled = true;
     const strategy = stratSel.value;
     const s = { id: rid(12), secret: rid(16), mode: modeSel.value, strategy };
+    log(`opening session: mode=${s.mode}, strategy=${strategy}, room=${short(s.id)}`);
     try {
-      log(`opening session (strategy ${strategy}, Trystero ${TRYSTERO_VERSION})…`);
       conn = await connect(strategy, s.id, s.secret, {
         log,
-        onJoin: pid => log('peer connected ' + short(pid) + ' (waiting for its join request)'),
+        onJoin: pid => log('peer connected ' + short(pid) + ' – waiting for its join request'),
         onLeave: pid => {
-          const p = peers.get(pid); log('peer left ' + short(pid) + (p ? ` (${p.name})` : ''));
-          if (p) { peers.delete(pid); if (p.status === 'approved') systemMsg(`${p.name} (Player ${p.num}) disconnected`); renderPeople(); broadcastRoster(); }
+          const p = peers.get(pid);
+          if (p) { log(`${p.name} (${p.status}) left`); peers.delete(pid); if (p.status === 'approved') systemMsg(`${p.name} (Player ${p.num}) disconnected`); renderPeople(); broadcastRoster(); }
+          else log(`peer ${short(pid)} left (had not sent a join request)`);
         },
         onMessage: (m, pid) => onMsg(m, pid),
       });
     } catch (e) {
-      log('could not open session: ' + e.message); opening = false; toggleBtn.disabled = stratSel.disabled = false; return;
+      log('COULD NOT OPEN SESSION: ' + e.message); opening = false; toggleBtn.disabled = stratSel.disabled = false; return;
     }
     session = s; opening = false; toggleBtn.disabled = false;
     linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}.${strategy}`;
     toggleBtn.textContent = 'Close session'; chat.setEnabled(true);
-    log('session open, room ' + s.id);
+    log('SESSION OPEN – share the link; waiting for players. Room ' + short(s.id));
     renderPeople();
   }
 
   function closeSession() {
     if (!session) return;
+    log(`closing session; notifying ${peers.size} connected peer(s)`);
     [...peers.keys()].forEach(pid => sendTo({ t: 'closed' }, pid));
     const c = conn; setTimeout(() => c?.leave(), 400); // let 'closed' go out first
     peers.clear(); session = null; conn = null; stratSel.disabled = false;
@@ -235,32 +310,35 @@ function viewDM(cid) {
   }
 
   function onMsg(m, pid) {
-    if (!m || typeof m !== 'object' || !session) return;
+    if (!m || typeof m !== 'object') { log(`ignored malformed message from ${short(pid)}`); return; }
+    if (!session) { log(`ignored ${m.t} from ${short(pid)}: no open session`); return; }
     if (m.t === 'join') return handleJoin(m, pid);
     const p = peers.get(pid);
-    if (!p || p.status !== 'approved') return;          // ignore anything from non-approved peers
+    if (!p || p.status !== 'approved') { log(`ignored ${m.t} from ${short(pid)}: not an approved player`); return; }
     if (m.t === 'chat') {
       const text = String(m.text || '').trim().slice(0, 500);
-      if (text) postChat({ from: `${p.name} (P${p.num})`, text });
-    }
+      if (text) { log(`chat from Player ${p.num}, relaying to ${approvedPids().length} peer(s)`); postChat({ from: `${p.name} (P${p.num})`, text }); }
+    } else log(`ignored unknown message type "${m.t}" from Player ${p.num}`);
   }
 
   function handleJoin(m, pid) {
     const token = String(m.token || '').slice(0, 64);
     const name = String(m.name || '').trim().slice(0, 30) || 'Player';
-    if (!token) return;
+    if (!token) { log(`join request from ${short(pid)} without token – ignored`); return; }
     const rec = camp.players[token];
-    log(`join request from ${short(pid)} "${name}"${rec ? ' (known as Player ' + rec.num + ')' : ''}`);
-    if (rec?.banned) return sendTo({ t: 'denied', reason: 'You are banned.' }, pid);
-    for (const [oid, o] of peers) if (o.token === token && oid !== pid) peers.delete(oid); // reconnect: drop stale entry
+    log(`JOIN REQUEST from ${short(pid)} "${name}" token ${token.slice(0, 6)}…${rec ? ` (known: Player ${rec.num}${rec.banned ? ', BANNED' : ''})` : ' (new)'} – mode ${session.mode}`);
+    if (rec?.banned) { log('-> denied (banned)'); return sendTo({ t: 'denied', reason: 'You are banned.' }, pid); }
+    for (const [oid, o] of peers) if (o.token === token && oid !== pid) { log(`dropping stale connection ${short(oid)} of the same player`); peers.delete(oid); }
     if (rec) {                                          // known player: re-admit, keep number
       rec.name = name; save();
       peers.set(pid, { token, name, status: 'approved', num: rec.num });
+      log(`-> re-admitted as Player ${rec.num}`);
       sendAccepted(pid); systemMsg(`${name} (Player ${rec.num}) reconnected`); renderPeople(); broadcastRoster(); return;
     }
-    if (session.mode === 'locked') return sendTo({ t: 'denied', reason: 'Session is locked.' }, pid);
+    if (session.mode === 'locked') { log('-> denied (session locked)'); return sendTo({ t: 'denied', reason: 'Session is locked.' }, pid); }
     peers.set(pid, { token, name, status: 'pending' });
-    if (session.mode === 'open') return approve(pid);
+    if (session.mode === 'open') { log('-> auto-approving (open mode)'); return approve(pid); }
+    log('-> waiting for DM approval (see Lobby)');
     sendTo({ t: 'pending' }, pid); renderPeople();
   }
 
@@ -269,20 +347,22 @@ function viewDM(cid) {
     const num = camp.nextNum++;
     camp.players[p.token] = { num, name: p.name, banned: false };
     p.status = 'approved'; p.num = num; save();
+    log(`APPROVED ${p.name} as Player ${num}; saved to localStorage`);
     sendAccepted(pid); systemMsg(`${p.name} joined as Player ${num}`); renderPeople(); broadcastRoster();
   }
   const sendAccepted = pid => {
-    const p = peers.get(pid);
-    sendTo({ t: 'accepted', num: p.num, name: p.name, campaignName: camp.name, history: camp.chat.slice(-50), roster: roster() }, pid);
+    const p = peers.get(pid), history = camp.chat.slice(-50);
+    log(`sending accepted + ${history.length} history message(s) to Player ${p.num}`);
+    sendTo({ t: 'accepted', num: p.num, name: p.name, campaignName: camp.name, history, roster: roster() }, pid);
   };
-  function deny(pid) { sendTo({ t: 'denied', reason: 'The DM declined your request.' }, pid); peers.delete(pid); renderPeople(); }
+  function deny(pid) { log(`DENIED ${peers.get(pid)?.name}`); sendTo({ t: 'denied', reason: 'The DM declined your request.' }, pid); peers.delete(pid); renderPeople(); }
   function kick(token, ban) {
     const pid = [...peers].find(([, p]) => p.token === token)?.[0];
     if (pid) { sendTo({ t: 'kicked', ban }, pid); peers.delete(pid); }
     if (ban && camp.players[token]) { camp.players[token].banned = true; save(); }
-    log((ban ? 'banned ' : 'kicked ') + token.slice(0, 6)); renderPeople(); broadcastRoster();
+    log(`${ban ? 'BANNED' : 'KICKED'} token ${token.slice(0, 6)}… (was ${pid ? 'online' : 'offline'})`); renderPeople(); broadcastRoster();
   }
-  function unban(token) { camp.players[token].banned = false; save(); renderPeople(); }
+  function unban(token) { camp.players[token].banned = false; save(); log('unbanned token ' + token.slice(0, 6) + '…'); renderPeople(); }
 
   function systemMsg(text) { postChat({ sys: true, text }); }
   function postChat(partial) {
@@ -312,6 +392,7 @@ function viewDM(cid) {
     const url = URL.createObjectURL(new Blob([JSON.stringify(camp, null, 2)], { type: 'application/json' }));
     const a = h('a', { href: url, download: `${camp.name.replace(/[^\w-]+/g, '_')}.vttrpg.json` });
     document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    log('campaign exported to file');
   }
 
   renderPeople();
@@ -332,56 +413,66 @@ function viewDM(cid) {
 // ---------- PLAYER ----------
 function viewPlayer(sid, secret, strategy) {
   let token = sessionStorage.getItem(SS_TOKEN);
+  const newToken = !token;
   if (!token) { token = rid(24); sessionStorage.setItem(SS_TOKEN, token); }
-  const { el: logEl, log } = makeLog();
+  const { el: logEl, log } = makeLog('Player', () => conn ? conn.status() : log('not connected yet'));
+  log(`link: room ${short(sid)}, strategy ${strategy}; identity token ${token.slice(0, 6)}… (${newToken ? 'new for this tab' : 'kept from earlier in this tab'})`);
   const statusEl = h('div', { class: 'status' }, 'Enter a name and join.');
   const rosterEl = h('div', { class: 'muted' });
   const nameIn = h('input', { value: localStorage.getItem(LS_NAME) || '', placeholder: 'Your name', maxlength: '30' });
   const joinBtn = h('button', { onclick: () => join() }, 'Join');
-  let conn = null, dmPid = null, state = 'idle', timer = null, left = false;
+  let conn = null, dmPid = null, state = 'idle', timer = null, left = false, t0 = 0;
   const chat = makeChat(text => { if (state === 'accepted' && dmPid) conn.send({ t: 'chat', text }, dmPid); });
   chat.setEnabled(false);
 
-  const setState = (s, text) => { state = s; statusEl.textContent = text; chat.setEnabled(s === 'accepted'); };
+  const setState = (s, text) => { if (s !== state) log(`state: ${state} -> ${s} | ${text}`); state = s; statusEl.textContent = text; chat.setEnabled(s === 'accepted'); };
   const sendJoin = pid => { log('sending join request to ' + short(pid)); conn.send({ t: 'join', token, name: nameIn.value.trim() || 'Player' }, pid); };
   const leave = () => { left = true; conn?.leave(); };
 
   async function join() {
     const name = nameIn.value.trim(); if (!name) { nameIn.focus(); return; }
-    localStorage.setItem(LS_NAME, name); joinBtn.disabled = nameIn.disabled = true;
+    localStorage.setItem(LS_NAME, name); joinBtn.disabled = nameIn.disabled = true; t0 = performance.now();
+    log(`Join clicked as "${name}"`);
     setState('connecting', 'Connecting to the DM… (can take 5–20 s)');
-    log(`strategy ${strategy}, Trystero ${TRYSTERO_VERSION}`);
     try {
       const c = await connect(strategy, sid, secret, {
         log,
-        onJoin: pid => { log('peer connected ' + short(pid)); if (!dmPid && state !== 'denied' && state !== 'kicked' && conn) sendJoin(pid); },
+        onJoin: pid => {
+          log('peer connected ' + short(pid));
+          if (!dmPid && state !== 'denied' && state !== 'kicked' && conn) sendJoin(pid);
+          else log(`not sending join request to ${short(pid)} (dmPid=${dmPid ? short(dmPid) : 'none'}, state=${state})`);
+        },
         onLeave: pid => {
-          log('peer left ' + short(pid));
-          if (pid === dmPid && !left) { dmPid = null; if (state === 'accepted' || state === 'pending') setState('connecting', 'DM disconnected. Waiting for the DM to come back…'); }
+          if (pid === dmPid && !left) { log('the DM peer disconnected'); dmPid = null; if (state === 'accepted' || state === 'pending') setState('connecting', 'DM disconnected. Waiting for the DM to come back…'); }
+          else log(`peer ${short(pid)} left (not the DM)`);
         },
         onMessage: (m, pid) => onMsg(m, pid),
       });
       if (left) { c.leave(); return; }
       conn = c;
-    } catch (e) { setState('error', 'Could not start networking: ' + e.message); return; }
-    timer = setTimeout(() => { if (state === 'connecting') setState('connecting', 'No DM found yet. Is the session open and the link current? (still trying… see the log below)'); }, JOIN_TIMEOUT_MS);
+    } catch (e) { log('COULD NOT START NETWORKING: ' + e.message); setState('error', 'Could not start networking: ' + e.message); return; }
+    timer = setTimeout(() => {
+      if (state === 'connecting') { log(`no DM answered after ${Math.round((performance.now() - t0) / 1000)} s – check relay states above / "Log status now"`); setState('connecting', 'No DM found yet. Is the session open and the link current? (still trying… see the log below)'); }
+    }, JOIN_TIMEOUT_MS);
   }
 
   function onMsg(m, pid) {
-    if (!m || typeof m !== 'object') return;
+    if (!m || typeof m !== 'object') { log(`ignored malformed message from ${short(pid)}`); return; }
     const handshake = ['pending', 'accepted', 'denied'].includes(m.t);
-    if (!handshake && pid !== dmPid) return;          // only trust the peer that answered our join request
-    if (dmPid && pid !== dmPid) return;
+    if (!handshake && pid !== dmPid) { log(`ignored "${m.t}" from ${short(pid)} (not the DM)`); return; }
+    if (dmPid && pid !== dmPid) { log(`ignored "${m.t}" from ${short(pid)} (DM is ${short(dmPid)})`); return; }
     switch (m.t) {
-      case 'pending': dmPid = pid; setState('pending', 'Waiting for the DM to approve you…'); break;
+      case 'pending': dmPid = pid; log(`DM identified: ${short(pid)}`); setState('pending', 'Waiting for the DM to approve you…'); break;
       case 'accepted':
         dmPid = pid; clearTimeout(timer); chat.clear(); (m.history || []).forEach(chat.add); renderRoster(m.roster);
+        log(`ACCEPTED as Player ${m.num}; received ${(m.history || []).length} history message(s); ${Math.round((performance.now() - t0) / 1000)} s since Join`);
         setState('accepted', `Joined "${m.campaignName}" as Player ${m.num} (${m.name})`); break;
       case 'denied': dmPid = pid; setState('denied', 'Not admitted: ' + (m.reason || 'denied')); leave(); break;
       case 'kicked': setState('kicked', m.ban ? 'You were banned by the DM.' : 'You were kicked by the DM.'); leave(); break;
       case 'closed': setState('closed', 'The DM closed the session.'); leave(); break;
       case 'chat': chat.add(m.msg); break;
-      case 'roster': renderRoster(m.roster); break;
+      case 'roster': renderRoster(m.roster); log(`roster update: ${(m.roster || []).length} player(s)`); break;
+      default: log(`unknown message type "${m.t}"`);
     }
   }
 
