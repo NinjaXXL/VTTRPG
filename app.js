@@ -1,7 +1,7 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via Trystero.
 // The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.4.1';
 const APP_ID = 'vttrpg-skeleton-v2';              // namespace for the signaling relays (not secret)
 const TRYSTERO_VERSION = '0.26.0';                // pinned: the API changed a lot between releases
 
@@ -37,7 +37,25 @@ if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
       });
       this.addEventListener('icecandidateerror', e => L(`ICE candidate error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
       this.addEventListener('iceconnectionstatechange', () => L(`ice=${this.iceConnectionState}`));
-      this.addEventListener('connectionstatechange', () => L(`conn=${this.connectionState}`));
+      this.addEventListener('connectionstatechange', () => { L(`conn=${this.connectionState}`); if (this.connectionState === 'failed') summarize(); });
+      // what the OTHER side offered (candidate types only, no addresses are logged)
+      const remote = {};
+      const countRemote = c => { const t = / typ (\w+)/.exec(c || '')?.[1]; if (t) remote[t] = (remote[t] || 0) + 1; };
+      const origSRD = this.setRemoteDescription.bind(this);
+      this.setRemoteDescription = d => {
+        (d?.sdp || '').split('\n').filter(l => l.startsWith('a=candidate')).forEach(countRemote);
+        L(`remote ${d?.type} set; remote candidates so far: ${JSON.stringify(remote)}`);
+        return origSRD(d);
+      };
+      const origAIC = this.addIceCandidate.bind(this);
+      this.addIceCandidate = c => { countRemote(c?.candidate); return origAIC(c); };
+      const summarize = async () => {
+        try {
+          const st = await this.getStats(); let n = 0, ok = 0, bad = 0, other = 0, sent = 0, rcv = 0;
+          st.forEach(r => { if (r.type === 'candidate-pair') { n++; if (r.state === 'succeeded') ok++; else if (r.state === 'failed') bad++; else other++; sent += r.requestsSent || 0; rcv += r.responsesReceived || 0; } });
+          L(`FAILURE SUMMARY: candidate pairs ${n} (succeeded ${ok}, failed ${bad}, other ${other}); connectivity checks sent ${sent}, responses received ${rcv}; remote candidates seen ${JSON.stringify(remote)}; local ${JSON.stringify(cand)}`);
+        } catch (e) { L('stats error: ' + e.message); }
+      };
     }
   };
 }
