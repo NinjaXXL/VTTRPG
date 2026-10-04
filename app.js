@@ -1,7 +1,7 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via Trystero.
 // The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 const APP_ID = 'vttrpg-skeleton-v2';              // namespace for the signaling relays (not secret)
 const TRYSTERO_VERSION = '0.26.0';                // pinned: the API changed a lot between releases
 
@@ -17,6 +17,30 @@ addEventListener('unhandledrejection', e => activeLog?.('unhandled rejection: ' 
 addEventListener('online', () => activeLog?.('browser went ONLINE'));
 addEventListener('offline', () => activeLog?.('browser went OFFLINE'));
 document.addEventListener('visibilitychange', () => activeLog?.('tab is now ' + document.visibilityState));
+
+// Log every WebRTC connection attempt (ICE servers, candidate types, state changes).
+// This shows WHY a direct connection fails: no srflx = STUN blocked; srflx on both sides but still failing = strict NAT -> needs TURN.
+if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
+  window.__vttrpgPcPatched = true;
+  const NativePC = window.RTCPeerConnection; let pcCount = 0;
+  window.RTCPeerConnection = class extends NativePC {
+    constructor(cfg, ...rest) {
+      super(cfg, ...rest);
+      const id = ++pcCount, L = m => activeLog?.(`rtc#${id}: ${m}`);
+      const kinds = {};
+      (cfg?.iceServers || []).flatMap(s => [].concat(s.urls || [])).forEach(u => { const k = String(u).split(':')[0]; kinds[k] = (kinds[k] || 0) + 1; });
+      L(`new connection; ICE servers: ${JSON.stringify(kinds)}${cfg?.iceTransportPolicy ? ', policy=' + cfg.iceTransportPolicy : ''}`);
+      const cand = {};
+      this.addEventListener('icecandidate', e => {
+        if (e.candidate) { const t = / typ (\w+)/.exec(e.candidate.candidate)?.[1] || '?'; const k = `${t}/${e.candidate.protocol || '?'}`; cand[k] = (cand[k] || 0) + 1; }
+        else L(`ICE gathering finished; local candidates: ${JSON.stringify(cand)}`);
+      });
+      this.addEventListener('icecandidateerror', e => L(`ICE candidate error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
+      this.addEventListener('iceconnectionstatechange', () => L(`ice=${this.iceConnectionState}`));
+      this.addEventListener('connectionstatechange', () => L(`conn=${this.connectionState}`));
+    }
+  };
+}
 const footer = document.getElementById('version');
 if (footer) footer.textContent = `VTTRPG skeleton v${APP_VERSION} · Trystero ${TRYSTERO_VERSION}`;
 
@@ -53,7 +77,7 @@ async function candidateInfo(pc) {                // which network path is used?
 }
 
 // Returns { send(data, targetPeerId?), leave(), status() }
-async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage }) {
+async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage, turn }) {
   const t0 = performance.now(), ms = () => Math.round(performance.now() - t0);
   let tx = 0, rx = 0;
   log(`env: online=${navigator.onLine} secureContext=${isSecureContext} RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'}`);
@@ -62,7 +86,8 @@ async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessa
   const mod = await loadStrategy(strategy, log);
   log(`library ready after ${ms()} ms (exports: ${Object.keys(mod).join(', ')})`);
   log(`joining room ${short(roomId)}… appId=${APP_ID}, handshake encrypted with the link secret`);
-  const room = mod.joinRoom({ appId: APP_ID, password: secret }, roomId, {
+  log(turn ? `TURN relay configured: ${turn.urls.join(', ')}` : 'no TURN relay configured (STUN only: direct connections only)');
+  const room = mod.joinRoom({ appId: APP_ID, password: secret, ...(turn ? { turnConfig: [turn] } : {}) }, roomId, {
     onJoinError: d => log('JOIN ERROR: ' + safeStr(d)),
   });
   log(`joinRoom() returned after ${ms()} ms`);
@@ -122,6 +147,7 @@ const LS_CAMPAIGNS = 'vttrpg:campaigns';       // DM side: all campaigns (localS
 const LS_NAME = 'vttrpg:playerName';           // player side: last used name
 const SS_TOKEN = 'vttrpg:playerToken';         // player side: per-tab identity (sessionStorage => testable with several tabs)
 const JOIN_TIMEOUT_MS = 25000;
+const LS_TURN = 'vttrpg:turn';               // DM side: optional TURN relay settings
 
 const rid = (n = 12) => {
   const a = new Uint8Array(n); crypto.getRandomValues(a);
@@ -184,6 +210,18 @@ function makeChat(onSend) {
   };
 }
 
+// TURN settings travel inside the join link (URL hash, never sent to a server) as base64url JSON
+const b64e = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64d = s => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))));
+const parseTurn = q => {
+  try {
+    const t = new URLSearchParams(q).get('t'); if (!t) return null;
+    const o = b64d(t);
+    const urls = [].concat(o.urls || []).map(String).filter(u => /^(turns?|stuns?):/.test(u));
+    return urls.length ? { urls, username: String(o.username || ''), credential: String(o.credential || '') } : null;
+  } catch { return null; }
+};
+
 // ---------- router ----------
 const $app = document.getElementById('app');
 let cleanup = null;
@@ -192,9 +230,9 @@ function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   activeLog = null;
   $app.replaceChildren();
-  const hash = location.hash.replace(/^#/, '') || '/';
+  const [hash, query = ''] = (location.hash.replace(/^#/, '') || '/').split('?');
   let m;
-  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)(?:\.([a-z]+))?$/))) return viewPlayer(m[1], m[2], STRATEGIES[m[3]] ? m[3] : DEFAULT_STRATEGY);
+  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)(?:\.([a-z]+))?$/))) return viewPlayer(m[1], m[2], STRATEGIES[m[3]] ? m[3] : DEFAULT_STRATEGY, parseTurn(query));
   if ((m = hash.match(/^\/dm\/([a-z0-9]+)$/))) return viewDM(m[1]);
   viewHome();
 }
@@ -263,6 +301,15 @@ function viewDM(cid) {
   const linkIn = h('input', { readonly: '', placeholder: 'Open the session to get a link' });
   const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); log('join link copied'); } }, 'Copy link');
   const lobbyEl = h('div'), playersEl = h('div');
+  const savedTurn = (() => { try { return JSON.parse(localStorage.getItem(LS_TURN)) || {}; } catch { return {}; } })();
+  const turnUrls = h('input', { placeholder: 'turn:host:3478, turns:host:443?transport=tcp', value: savedTurn.urls || '' });
+  const turnUser = h('input', { placeholder: 'username', value: savedTurn.username || '' });
+  const turnCred = h('input', { placeholder: 'credential', value: savedTurn.credential || '' });
+  const readTurn = () => {
+    localStorage.setItem(LS_TURN, JSON.stringify({ urls: turnUrls.value, username: turnUser.value, credential: turnCred.value }));
+    const urls = turnUrls.value.split(',').map(s => s.trim()).filter(Boolean);
+    return urls.length ? { urls, username: turnUser.value.trim(), credential: turnCred.value.trim() } : null;
+  };
   chat.setEnabled(false);
 
   const sendTo = (data, pid) => conn?.send(data, pid);
@@ -277,10 +324,11 @@ function viewDM(cid) {
     opening = true; toggleBtn.disabled = stratSel.disabled = true;
     const strategy = stratSel.value;
     const s = { id: rid(12), secret: rid(16), mode: modeSel.value, strategy };
+    const turn = readTurn();
     log(`opening session: mode=${s.mode}, strategy=${strategy}, room=${short(s.id)}`);
     try {
       conn = await connect(strategy, s.id, s.secret, {
-        log,
+        log, turn,
         onJoin: pid => log('peer connected ' + short(pid) + ' – waiting for its join request'),
         onLeave: pid => {
           const p = peers.get(pid);
@@ -293,7 +341,8 @@ function viewDM(cid) {
       log('COULD NOT OPEN SESSION: ' + e.message); opening = false; toggleBtn.disabled = stratSel.disabled = false; return;
     }
     session = s; opening = false; toggleBtn.disabled = false;
-    linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}.${strategy}`;
+    linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}.${strategy}${turn ? '?t=' + b64e(turn) : ''}`;
+    if (turn) log('join link includes the TURN settings (anyone with the link can use that TURN account)');
     toggleBtn.textContent = 'Close session'; chat.setEnabled(true);
     log('SESSION OPEN – share the link; waiting for players. Room ' + short(s.id));
     renderPeople();
@@ -402,6 +451,9 @@ function viewDM(cid) {
     h('section', {}, h('h2', {}, 'Session'),
       h('div', { class: 'row' }, 'Join mode:', modeSel, 'Signaling:', stratSel, toggleBtn), h('div', { class: 'row' }, linkIn, copyBtn),
       h('div', { class: 'muted' }, 'Keep this tab open and in the foreground while playing. Closing the session kills the link. The signaling choice is stored in the link.')),
+    h('section', {}, h('h2', {}, 'TURN relay (optional, needed when players cannot connect directly)'),
+      h('div', { class: 'row' }, turnUrls, turnUser, turnCred),
+      h('div', { class: 'muted' }, 'Get these from a TURN provider (see README). Saved in this browser and added to the join link when you open a session. Only relays encrypted traffic.')),
     h('section', {}, h('h2', {}, 'Lobby (waiting for approval)'), lobbyEl),
     h('section', {}, h('h2', {}, 'Players of this campaign'), playersEl),
     h('section', {}, h('h2', {}, 'Chat (stored in this browser)'), chat.el),
@@ -411,7 +463,7 @@ function viewDM(cid) {
 }
 
 // ---------- PLAYER ----------
-function viewPlayer(sid, secret, strategy) {
+function viewPlayer(sid, secret, strategy, turn) {
   let token = sessionStorage.getItem(SS_TOKEN);
   const newToken = !token;
   if (!token) { token = rid(24); sessionStorage.setItem(SS_TOKEN, token); }
@@ -436,7 +488,7 @@ function viewPlayer(sid, secret, strategy) {
     setState('connecting', 'Connecting to the DM… (can take 5–20 s)');
     try {
       const c = await connect(strategy, sid, secret, {
-        log,
+        log, turn,
         onJoin: pid => {
           log('peer connected ' + short(pid));
           if (!dmPid && state !== 'denied' && state !== 'kicked' && conn) sendJoin(pid);
