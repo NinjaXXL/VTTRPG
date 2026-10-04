@@ -1,7 +1,7 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via Trystero.
 // The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
 
-const APP_VERSION = '0.4.1';
+const APP_VERSION = '0.4.2';
 const APP_ID = 'vttrpg-skeleton-v2';              // namespace for the signaling relays (not secret)
 const TRYSTERO_VERSION = '0.26.0';                // pinned: the API changed a lot between releases
 
@@ -36,7 +36,10 @@ if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
         else L(`ICE gathering finished; local candidates: ${JSON.stringify(cand)}`);
       });
       this.addEventListener('icecandidateerror', e => L(`ICE candidate error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
-      this.addEventListener('iceconnectionstatechange', () => L(`ice=${this.iceConnectionState}`));
+      this.addEventListener('iceconnectionstatechange', () => {
+        L(`ice=${this.iceConnectionState}`);
+        if (this.iceConnectionState === 'checking') [3000, 8000, 12000].forEach(t => setTimeout(() => { if (this.iceConnectionState === 'checking') summarize(`in-flight @${t / 1000}s`); }, t));
+      });
       this.addEventListener('connectionstatechange', () => { L(`conn=${this.connectionState}`); if (this.connectionState === 'failed') summarize(); });
       // what the OTHER side offered (candidate types only, no addresses are logged)
       const remote = {};
@@ -48,12 +51,17 @@ if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
         return origSRD(d);
       };
       const origAIC = this.addIceCandidate.bind(this);
-      this.addIceCandidate = c => { countRemote(c?.candidate); return origAIC(c); };
-      const summarize = async () => {
+      this.addIceCandidate = c => {
+        countRemote(c?.candidate);
+        const kind = c?.candidate ? `${/ typ (\w+)/.exec(c.candidate)?.[1]}${/ [0-9a-f-]+\.local /.test(c.candidate) ? ' (mDNS name)' : ''}` : 'end-of-candidates';
+        L(`addIceCandidate ${kind}; signaling=${this.signalingState}, remoteDescription=${this.remoteDescription ? 'set' : 'NOT SET'}`);
+        return origAIC(c).then(r => r, e => { L(`addIceCandidate REJECTED: ${e.name}: ${e.message}`); throw e; });
+      };
+      const summarize = async (label = 'FAILURE SUMMARY') => {
         try {
-          const st = await this.getStats(); let n = 0, ok = 0, bad = 0, other = 0, sent = 0, rcv = 0;
-          st.forEach(r => { if (r.type === 'candidate-pair') { n++; if (r.state === 'succeeded') ok++; else if (r.state === 'failed') bad++; else other++; sent += r.requestsSent || 0; rcv += r.responsesReceived || 0; } });
-          L(`FAILURE SUMMARY: candidate pairs ${n} (succeeded ${ok}, failed ${bad}, other ${other}); connectivity checks sent ${sent}, responses received ${rcv}; remote candidates seen ${JSON.stringify(remote)}; local ${JSON.stringify(cand)}`);
+          const st = await this.getStats(); const lines = [];
+          st.forEach(r => { if (r.type === 'candidate-pair') { const l = st.get(r.localCandidateId), q = st.get(r.remoteCandidateId); lines.push(`${r.state} ${l?.candidateType}->${q?.candidateType} checks sent/answered ${r.requestsSent || 0}/${r.responsesReceived || 0}`); } });
+          L(`${label}: ${lines.length} candidate pair(s) [${lines.join('; ')}]; remote candidates seen ${JSON.stringify(remote)}; connectionState=${this.connectionState}`);
         } catch (e) { L('stats error: ' + e.message); }
       };
     }
