@@ -1,1051 +1,377 @@
-const VERSION = '0.12.0';
 const PREFIX = 'vttrpg-';
 
-const CONNECT_TIMEOUT = 10000;
-const RECONNECT_START = 1000;
-const RECONNECT_MAX = 30000;
-
-// Automatic relay. The user does not configure anything.
-const PEER_CONFIG = {
-  debug: 2,
-
+const PEER_OPTIONS = {
   config: {
     iceServers: [
       {
+        urls: 'stun:stun.l.google.com:19302'
+      },
+      {
         urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
         username: 'webrtc',
-        credential: 'webrtc',
-      },
-    ],
-
-    iceTransportPolicy: 'relay',
-
-    sdpSemantics: 'unified-plan',
-  },
+        credential: 'webrtc'
+      }
+    ]
+  }
 };
 
 const app = document.getElementById('app');
 
-let cleanup = null;
-let logBox = null;
+let peer = null;
+let connection = null;
 
-function log(text) {
-  const line =
-    `${new Date().toLocaleTimeString()}  ${text}`;
-
-  if (logBox) {
-    logBox.textContent +=
-      line + '\n';
-
-    logBox.scrollTop =
-      logBox.scrollHeight;
-  }
-
-  console.log(
-    '[VTTRPG]',
-    text
-  );
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
 }
 
-function makeLog() {
-  logBox =
-    document.createElement('pre');
-
-  logBox.className =
-    'log';
-
-  return logBox;
+function createRoomId() {
+  return Math.random().toString(36).slice(2, 12);
 }
 
-function h(
-  tag,
-  props = {},
-  ...children
-) {
-  const el =
-    document.createElement(tag);
-
-  for (
-    const [key, value]
-    of Object.entries(props)
-  ) {
-    if (
-      key.startsWith('on')
-    ) {
-      el.addEventListener(
-        key.slice(2),
-        value
-      );
-    } else if (
-      key === 'class'
-    ) {
-      el.className =
-        value;
-    } else {
-      el.setAttribute(
-        key,
-        value
-      );
-    }
-  }
-
-  for (
-    const child
-    of children.flat()
-  ) {
-    if (
-      child === null ||
-      child === undefined ||
-      child === false
-    ) {
-      continue;
-    }
-
-    el.append(
-      child instanceof Node
-        ? child
-        : String(child)
-    );
-  }
-
-  return el;
+function getBaseUrl() {
+  return location.origin + location.pathname;
 }
 
-function randomRoom() {
-  const chars =
-    'abcdefghijklmnopqrstuvwxyz0123456789';
+function addChat(from, text) {
+  const chat = document.getElementById('chat');
+  if (!chat) return;
 
-  const bytes =
-    new Uint8Array(14);
-
-  crypto.getRandomValues(
-    bytes
+  chat.insertAdjacentHTML(
+    'beforeend',
+    `<div class="msg"><b>${escapeHtml(from)}:</b> ${escapeHtml(text)}</div>`
   );
 
-  return [...bytes]
-    .map(
-      byte =>
-        chars[
-          byte % chars.length
-        ]
-    )
-    .join('');
+  chat.scrollTop = chat.scrollHeight;
 }
 
-function chatUi(send) {
-  const box =
-    h(
-      'div',
-      {
-        class:
-          'chat',
-      }
-    );
+function chatUi(enabled) {
+  return `
+    <div id="chat"></div>
 
-  const input =
-    h(
-      'input',
-      {
-        placeholder:
-          'Message…',
+    <div class="row">
+      <input
+        id="message"
+        placeholder="Nachricht…"
+        ${enabled ? '' : 'disabled'}
+      >
 
-        maxlength:
-          '500',
-      }
-    );
+      <button
+        id="send"
+        ${enabled ? '' : 'disabled'}
+      >
+        Senden
+      </button>
+    </div>
+  `;
+}
 
-  const button =
-    h(
-      'button',
-      {
-        onclick:
-          submit,
-      },
-      'Send'
-    );
+function enableChat(enabled) {
+  const input = document.getElementById('message');
+  const button = document.getElementById('send');
 
-  function submit() {
-    const text =
-      input.value.trim();
+  if (!input || !button) return;
 
-    if (!text) {
-      return;
+  input.disabled = !enabled;
+  button.disabled = !enabled;
+}
+
+function bindChat() {
+  const input = document.getElementById('message');
+  const button = document.getElementById('send');
+
+  if (!input || !button) return;
+
+  const send = () => {
+    const text = input.value.trim();
+
+    if (!text) return;
+    if (!connection || !connection.open) return;
+
+    connection.send({
+      type: 'chat',
+      text
+    });
+
+    addChat('Du', text);
+
+    input.value = '';
+    input.focus();
+  };
+
+  button.onclick = send;
+
+  input.onkeydown = event => {
+    if (event.key === 'Enter') {
+      send();
     }
-
-    send(text);
-
-    input.value =
-      '';
-  }
-
-  input.addEventListener(
-    'keydown',
-    event => {
-      if (
-        event.key ===
-        'Enter'
-      ) {
-        submit();
-      }
-    }
-  );
-
-  return {
-    el:
-      h(
-        'div',
-        {},
-
-        box,
-
-        h(
-          'div',
-          {
-            class:
-              'row',
-          },
-
-          input,
-          button
-        )
-      ),
-
-    add(message) {
-      box.append(
-        h(
-          'div',
-          {
-            class:
-              'msg',
-          },
-
-          h(
-            'span',
-            {
-              class:
-                'ts',
-            },
-
-            new Date(
-              message.ts
-            ).toLocaleTimeString() +
-              ' '
-          ),
-
-          h(
-            'b',
-            {},
-            `${message.from}: `
-          ),
-
-          message.text
-        )
-      );
-
-      box.scrollTop =
-        box.scrollHeight;
-    },
-
-    enable(value) {
-      input.disabled =
-        !value;
-
-      button.disabled =
-        !value;
-    },
   };
 }
 
-// -----------------------------------------------------------------------------
-// HOME
-// -----------------------------------------------------------------------------
+function showHome() {
+  app.innerHTML = `
+    <section>
+      <h2>DM</h2>
 
-function home() {
-  app.replaceChildren();
+      <button id="start">
+        Session öffnen
+      </button>
 
-  const logElement =
-    makeLog();
+      <p class="muted">
+        Session öffnen und danach den QR-Code für die Spieler anzeigen.
+      </p>
+    </section>
+  `;
 
-  const start =
-    h(
-      'button',
-      {
-        onclick:
-          () => {
-            location.hash =
-              `#/dm/${randomRoom()}`;
-          },
-      },
-      'Start DM'
-    );
-
-  app.append(
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'VTTRPG DM'
-      ),
-
-      h(
-        'p',
-        {
-          class:
-            'muted',
-        },
-        'Start a session. The app immediately creates the QR code.'
-      ),
-
-      start
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'Log'
-      ),
-
-      logElement
-    )
-  );
-
-  logBox =
-    logElement;
-
-  log(
-    `VTTRPG v${VERSION} ready`
-  );
+  document.getElementById('start').onclick = () => {
+    const room = createRoomId();
+    location.hash = '#/dm/' + room;
+  };
 }
 
-// -----------------------------------------------------------------------------
-// DM
-// -----------------------------------------------------------------------------
+function showDm(room) {
+  const link = `${getBaseUrl()}#/join/${room}`;
 
-function createDMPeer(
-  room,
-  onConnection
-) {
-  const peerId =
-    PREFIX + room;
+  app.innerHTML = `
+    <section>
+      <div class="status" id="status">
+        DM wird verbunden…
+      </div>
 
-  const peer =
-    new Peer(
-      peerId,
-      PEER_CONFIG
+      <p>
+        Spieler scannen diesen QR-Code:
+      </p>
+
+      <input
+        id="link"
+        readonly
+        value="${escapeHtml(link)}"
+      >
+
+      <div id="qr"></div>
+    </section>
+
+    <section>
+      <h2>Chat</h2>
+      ${chatUi(false)}
+    </section>
+  `;
+
+  bindChat();
+
+  if (window.QRCode) {
+    QRCode.toCanvas(
+      link,
+      {
+        width: 220
+      },
+      (error, canvas) => {
+        if (!error) {
+          const qr = document.getElementById('qr');
+          if (qr) {
+            qr.appendChild(canvas);
+          }
+        }
+      }
     );
-
-  peer.on(
-    'open',
-    id => {
-      log(
-        `DM PeerJS open: ${id}`
-      );
-    }
-  );
-
-  peer.on(
-    'error',
-    error => {
-      log(
-        `DM PeerJS error: ` +
-        `${error.type || error.message || error}`
-      );
-    }
-  );
-
-  peer.on(
-    'disconnected',
-    () => {
-      log(
-        'DM signaling disconnected'
-      );
-
-      setTimeout(
-        () => {
-          if (
-            !peer.destroyed
-          ) {
-            try {
-              peer.reconnect();
-
-              log(
-                'DM signaling reconnect requested'
-              );
-            } catch (
-              error
-            ) {
-              log(
-                `DM reconnect failed: ${error.message}`
-              );
-            }
-          }
-        },
-        1000
-      );
-    }
-  );
-
-  peer.on(
-    'connection',
-    connection => {
-      log(
-        `incoming connection from ${connection.peer}`
-      );
-
-      connection.on(
-        'iceStateChanged',
-        state => {
-          log(
-            `DM ICE: ${state}`
-          );
-        }
-      );
-
-      connection.on(
-        'open',
-        () => {
-          log(
-            `PLAYER CONNECTED: ${connection.peer}`
-          );
-
-          onConnection(
-            connection
-          );
-        }
-      );
-
-      connection.on(
-        'data',
-        data => {
-          if (
-            data?.type ===
-            'chat'
-          ) {
-            onConnection(
-              connection,
-              data
-            );
-          }
-        }
-      );
-
-      connection.on(
-        'close',
-        () => {
-          log(
-            `PLAYER DISCONNECTED: ${connection.peer}`
-          );
-        }
-      );
-
-      connection.on(
-        'error',
-        error => {
-          log(
-            `DM data error: ` +
-            `${error.type || error.message || error}`
-          );
-        }
-      );
-    }
-  );
-
-  return peer;
+  }
 }
 
-function dmView(
-  room
-) {
-  app.replaceChildren();
-
-  const logElement =
-    makeLog();
-
-  logBox =
-    logElement;
-
-  let player =
-    null;
-
-  const status =
-    h(
-      'div',
-      {
-        class:
-          'status',
-      },
-      'Starting…'
-    );
-
-  const joinUrl =
-    `${location.origin}` +
-    `${location.pathname}` +
-    `#/join/${room}`;
-
-  const url =
-    h(
-      'input',
-      {
-        readonly:
-          '',
-        value:
-          joinUrl,
-      }
-    );
-
-  const qr =
-    h(
-      'canvas',
-      {
-        id:
-          'qr',
-      }
-    );
-
-  const chat =
-    chatUi(
-      text => {
-        if (
-          !player?.open
-        ) {
-          return;
-        }
-
-        const message = {
-          from:
-            'DM',
-
-          text,
-
-          ts:
-            Date.now(),
-        };
-
-        chat.add(
-          message
-        );
-
-        player.send({
-          type:
-            'chat',
-
-          msg:
-            message,
-        });
-      }
-    );
-
-  chat.enable(
-    false
+function startDmPeer(room) {
+  peer = new Peer(
+    PREFIX + room,
+    PEER_OPTIONS
   );
 
-  const peer =
-    createDMPeer(
-      room,
-      (
-        connection,
-        data
-      ) => {
-        if (
-          !data
-        ) {
-          player =
-            connection;
+  peer.on('open', () => {
+    const status = document.getElementById('status');
 
-          status.textContent =
-            'Player connected';
-
-          chat.enable(
-            true
-          );
-
-          return;
-        }
-
-        if (
-          data.type ===
-          'chat'
-        ) {
-          chat.add(
-            data.msg
-          );
-
-          // Echo chat to all other participants.
-          if (
-            player?.open
-          ) {
-            player.send(
-              data
-            );
-          }
-        }
-      }
-    );
-
-  QRCode.toCanvas(
-    qr,
-    joinUrl,
-    {
-      width:
-        240,
-
-      margin:
-        2,
+    if (status) {
+      status.textContent = 'DM ist bereit. Warte auf Spieler…';
     }
-  );
+  });
 
-  status.textContent =
-    'Waiting for player…';
+  peer.on('connection', incoming => {
+    connection = incoming;
 
-  app.append(
-    h(
-      'section',
-      {},
+    connection.on('open', () => {
+      const status = document.getElementById('status');
 
-      h(
-        'h2',
-        {},
-        'DM session'
-      ),
-
-      status,
-
-      h(
-        'p',
-        {},
-        'Scan this QR code:'
-      ),
-
-      qr,
-
-      h(
-        'div',
-        {
-          class:
-            'row',
-        },
-
-        url,
-
-        h(
-          'button',
-          {
-            onclick:
-              async () => {
-                try {
-                  await navigator.clipboard.writeText(
-                    joinUrl
-                  );
-
-                  log(
-                    'link copied'
-                  );
-                } catch (
-                  error
-                ) {
-                  log(
-                    `copy failed: ${error.message}`
-                  );
-                }
-              },
-          },
-          'Copy link'
-        )
-      )
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'Chat'
-      ),
-
-      chat.el
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'Log'
-      ),
-
-      logElement
-    )
-  );
-
-  log(
-    `DM room: ${room}`
-  );
-
-  log(
-    `DM peer id: ${PREFIX}${room}`
-  );
-
-  log(
-    'ICE policy: relay only'
-  );
-
-  log(
-    'TURN: turn.anyfirewall.com:443/tcp'
-  );
-
-  cleanup =
-    () => {
-      try {
-        peer.destroy();
-      } catch {}
-    };
-}
-
-// -----------------------------------------------------------------------------
-// PLAYER
-// -----------------------------------------------------------------------------
-
-function playerView(
-  room
-) {
-  app.replaceChildren();
-
-  const logElement =
-    makeLog();
-
-  logBox =
-    logElement;
-
-  const status =
-    h(
-      'div',
-      {
-        class:
-          'status',
-      },
-      'Connecting…'
-    );
-
-  let connection =
-    null;
-
-  const chat =
-    chatUi(
-      text => {
-        if (
-          !connection?.open
-        ) {
-          return;
-        }
-
-        connection.send({
-          type:
-            'chat',
-
-          msg: {
-            from:
-              'Player',
-
-            text,
-
-            ts:
-              Date.now(),
-          },
-        });
+      if (status) {
+        status.textContent = 'Spieler verbunden.';
       }
-    );
 
-  chat.enable(
-    false
-  );
+      enableChat(true);
+    });
 
-  const peer =
-    new Peer(
-      undefined,
-      PEER_CONFIG
-    );
+    connection.on('data', message => {
+      if (
+        message &&
+        message.type === 'chat'
+      ) {
+        addChat('Spieler', message.text);
+      }
+    });
 
-  peer.on(
-    'open',
-    id => {
-      log(
-        `Player PeerJS open: ${id}`
-      );
+    connection.on('close', () => {
+      connection = null;
 
-      log(
-        `connecting to ${PREFIX}${room}`
-      );
+      const status = document.getElementById('status');
 
-      connection =
-        peer.connect(
-          PREFIX + room,
-          {
-            reliable:
-              true,
-          }
-        );
+      if (status) {
+        status.textContent = 'Spieler getrennt.';
+      }
 
-      let opened =
-        false;
+      enableChat(false);
+    });
 
-      const timer =
-        setTimeout(
-          () => {
-            if (
-              !opened
-            ) {
-              status.textContent =
-                'Connection failed';
+    connection.on('error', error => {
+      const status = document.getElementById('status');
 
-              log(
-                'connection timed out'
-              );
-            }
-          },
-          CONNECT_TIMEOUT
-        );
+      if (status) {
+        status.textContent =
+          'Verbindungsfehler: ' +
+          (error.type || error.message || error);
+      }
 
-      connection.on(
-        'iceStateChanged',
-        state => {
-          log(
-            `Player ICE: ${state}`
-          );
-        }
-      );
+      enableChat(false);
+    });
+  });
 
-      connection.on(
-        'open',
-        () => {
-          opened =
-            true;
+  peer.on('error', error => {
+    const status = document.getElementById('status');
 
-          clearTimeout(
-            timer
-          );
-
-          status.textContent =
-            'Connected';
-
-          chat.enable(
-            true
-          );
-
-          log(
-            'PLAYER CONNECTED'
-          );
-        }
-      );
-
-      connection.on(
-        'data',
-        data => {
-          if (
-            data?.type ===
-            'chat'
-          ) {
-            chat.add(
-              data.msg
-            );
-          }
-        }
-      );
-
-      connection.on(
-        'close',
-        () => {
-          status.textContent =
-            'Disconnected';
-
-          chat.enable(
-            false
-          );
-
-          log(
-            'connection closed'
-          );
-        }
-      );
-
-      connection.on(
-        'error',
-        error => {
-          status.textContent =
-            'Connection error';
-
-          log(
-            `data error: ` +
-            `${error.type || error.message || error}`
-          );
-        }
-      );
-    }
-  );
-
-  peer.on(
-    'error',
-    error => {
+    if (status) {
       status.textContent =
-        'PeerJS error';
-
-      log(
-        `Player PeerJS error: ` +
-        `${error.type || error.message || error}`
-      );
+        'PeerJS-Fehler: ' +
+        (error.type || error.message || error);
     }
-  );
-
-  peer.on(
-    'disconnected',
-    () => {
-      log(
-        'Player signaling disconnected'
-      );
-
-      setTimeout(
-        () => {
-          if (
-            !peer.destroyed &&
-            peer.disconnected
-          ) {
-            try {
-              peer.reconnect();
-            } catch {}
-          }
-        },
-        1000
-      );
-    }
-  );
-
-  app.append(
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'VTTRPG Player'
-      ),
-
-      status,
-
-      h(
-        'p',
-        {
-          class:
-            'muted',
-        },
-        `Room: ${room}`
-      )
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'Chat'
-      ),
-
-      chat.el
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'Log'
-      ),
-
-      logElement
-    )
-  );
-
-  log(
-    `room: ${room}`
-  );
-
-  log(
-    'ICE policy: relay only'
-  );
-
-  log(
-    'TURN: turn.anyfirewall.com:443/tcp'
-  );
-
-  cleanup =
-    () => {
-      try {
-        peer.destroy();
-      } catch {}
-    };
+  });
 }
 
-// -----------------------------------------------------------------------------
-// Router
-// -----------------------------------------------------------------------------
+function showPlayer(room) {
+  app.innerHTML = `
+    <section>
+      <div class="status" id="status">
+        Verbinde mit dem DM…
+      </div>
+    </section>
+
+    <section>
+      <h2>Chat</h2>
+      ${chatUi(false)}
+    </section>
+  `;
+
+  bindChat();
+
+  peer = new Peer(
+    undefined,
+    PEER_OPTIONS
+  );
+
+  peer.on('open', () => {
+    connection = peer.connect(
+      PREFIX + room,
+      {
+        reliable: true
+      }
+    );
+
+    connection.on('open', () => {
+      const status = document.getElementById('status');
+
+      if (status) {
+        status.textContent = 'Mit dem DM verbunden.';
+      }
+
+      enableChat(true);
+    });
+
+    connection.on('data', message => {
+      if (
+        message &&
+        message.type === 'chat'
+      ) {
+        addChat('DM', message.text);
+      }
+    });
+
+    connection.on('close', () => {
+      connection = null;
+
+      const status = document.getElementById('status');
+
+      if (status) {
+        status.textContent =
+          'Verbindung zum DM geschlossen.';
+      }
+
+      enableChat(false);
+    });
+
+    connection.on('error', error => {
+      const status = document.getElementById('status');
+
+      if (status) {
+        status.textContent =
+          'Verbindungsfehler: ' +
+          (error.type || error.message || error);
+      }
+
+      enableChat(false);
+    });
+  });
+
+  peer.on('error', error => {
+    const status = document.getElementById('status');
+
+    if (status) {
+      status.textContent =
+        'PeerJS-Fehler: ' +
+        (error.type || error.message || error);
+    }
+  });
+}
+
+function cleanupPeer() {
+  if (peer) {
+    try {
+      peer.destroy();
+    } catch (_) {
+    }
+  }
+
+  peer = null;
+  connection = null;
+}
 
 function route() {
-  cleanup?.();
+  cleanupPeer();
 
-  cleanup =
-    null;
+  const joinMatch =
+    location.hash.match(/^#\/join\/([a-z0-9]+)$/);
 
-  activeLog =
-    null;
+  const dmMatch =
+    location.hash.match(/^#\/dm\/([a-z0-9]+)$/);
 
-  const path =
-    (
-      location.hash
-        .replace(/^#/, '') ||
-      '/'
-    ).split('?')[0];
-
-  const dm =
-    path.match(
-      /^\/dm\/([a-z0-9]+)$/i
-    );
-
-  const player =
-    path.match(
-      /^\/join\/([a-z0-9]+)$/i
-    );
-
-  if (dm) {
-    dmView(
-      dm[1]
-    );
-
+  if (joinMatch) {
+    showPlayer(joinMatch[1]);
     return;
   }
 
-  if (player) {
-    playerView(
-      player[1]
-    );
-
+  if (dmMatch) {
+    showDm(dmMatch[1]);
+    startDmPeer(dmMatch[1]);
     return;
   }
 
-  home();
+  showHome();
 }
 
 window.addEventListener(

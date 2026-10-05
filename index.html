@@ -1,109 +1,82 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VTTRPG v0.12.0</title>
+  <title>VTTRPG</title>
 
   <style>
     body {
       font-family: system-ui, sans-serif;
       max-width: 760px;
-      margin: 1rem auto;
+      margin: 2rem auto;
       padding: 0 1rem;
       line-height: 1.4;
     }
 
-    h1 { font-size: 1.3rem; }
-    h2 { font-size: 1.05rem; }
-
     section {
-      border: 1px solid #8884;
-      border-radius: 6px;
-      padding: .7rem .8rem;
-      margin: .8rem 0;
+      border: 1px solid #aaa;
+      border-radius: 8px;
+      padding: 1rem;
+      margin: 1rem 0;
     }
 
-    input,
-    button {
+    button,
+    input {
       font: inherit;
-      padding: .35rem .5rem;
-      margin: .1rem;
+      padding: .5rem;
     }
 
-    input[readonly] {
-      width: 100%;
+    input {
       box-sizing: border-box;
+      width: 100%;
     }
 
     .row {
       display: flex;
-      gap: .35rem;
+      gap: .5rem;
       align-items: center;
       flex-wrap: wrap;
     }
 
-    .chat {
-      height: 16rem;
-      overflow-y: auto;
-      border: 1px solid #8886;
-      padding: .4rem;
-      border-radius: 4px;
+    .row input {
+      flex: 1;
+      min-width: 0;
+    }
+
+    #qr {
+      margin-top: 1rem;
+    }
+
+    #chat {
+      height: 18rem;
+      overflow: auto;
+      border: 1px solid #ccc;
+      padding: .5rem;
+      margin-bottom: .5rem;
     }
 
     .msg {
-      margin: .15rem 0;
-    }
-
-    .ts {
-      opacity: .5;
-      font-size: .8em;
+      margin: .25rem 0;
     }
 
     .muted {
       opacity: .65;
-      font-size: .9em;
     }
 
     .status {
-      font-weight: 700;
-    }
-
-    .log {
-      height: 12rem;
-      overflow-y: auto;
-      background: #8881;
-      padding: .4rem;
-      white-space: pre-wrap;
-      font: .76rem ui-monospace, monospace;
-    }
-
-    #qr {
-      margin: .7rem 0;
-    }
-
-    footer {
-      margin: 2rem 0 1rem;
-      text-align: center;
-      border-top: 1px solid #8884;
-      padding-top: .5rem;
+      font-weight: 600;
     }
   </style>
 </head>
 
 <body>
-  <h1>VTTRPG v0.12.0</h1>
+  <h1>VTTRPG</h1>
 
-  <div id="app">
-    Loading…
-  </div>
-
-  <footer class="muted">
-    VTTRPG v0.12.0
-  </footer>
+  <div id="app"></div>
 
   <script src="https://unpkg.com/peerjs@1/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1/build/qrcode.min.js"></script>
-  <script type="module" src="./app.js?v=0.12.0"></script>
+  <script src="./app.js?v=1"></script>
 </body>
 </html>
