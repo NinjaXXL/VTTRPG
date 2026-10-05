@@ -1,39 +1,67 @@
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 const PREFIX = 'vttrpg-';
 
 const CONNECT_TIMEOUT = 10000;
 const RECONNECT_START = 1000;
 const RECONNECT_MAX = 30000;
 
-const NAME_KEY = 'vttrpg:name';
-const DM_NAME_KEY = 'vttrpg:dmName';
+// Automatic relay. The user does not configure anything.
+const PEER_CONFIG = {
+  debug: 2,
+
+  config: {
+    iceServers: [
+      {
+        urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
+        username: 'webrtc',
+        credential: 'webrtc',
+      },
+    ],
+
+    iceTransportPolicy: 'relay',
+
+    sdpSemantics: 'unified-plan',
+  },
+};
 
 const app = document.getElementById('app');
 
 let cleanup = null;
-let activeLog = null;
+let logBox = null;
 
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
+function log(text) {
+  const line =
+    `${new Date().toLocaleTimeString()}  ${text}`;
 
-function id(length = 12) {
-  const chars =
-    'abcdefghijklmnopqrstuvwxyz0123456789';
+  if (logBox) {
+    logBox.textContent +=
+      line + '\n';
 
-  const bytes =
-    new Uint8Array(length);
+    logBox.scrollTop =
+      logBox.scrollHeight;
+  }
 
-  crypto.getRandomValues(bytes);
-
-  return [...bytes]
-    .map(
-      x => chars[x % chars.length]
-    )
-    .join('');
+  console.log(
+    '[VTTRPG]',
+    text
+  );
 }
 
-function h(tag, props = {}, ...children) {
+function makeLog() {
+  logBox =
+    document.createElement('pre');
+
+  logBox.className =
+    'log';
+
+  return logBox;
+}
+
+function h(
+  tag,
+  props = {},
+  ...children
+) {
   const el =
     document.createElement(tag);
 
@@ -41,13 +69,18 @@ function h(tag, props = {}, ...children) {
     const [key, value]
     of Object.entries(props)
   ) {
-    if (key.startsWith('on')) {
+    if (
+      key.startsWith('on')
+    ) {
       el.addEventListener(
         key.slice(2),
         value
       );
-    } else if (key === 'class') {
-      el.className = value;
+    } else if (
+      key === 'class'
+    ) {
+      el.className =
+        value;
     } else {
       el.setAttribute(
         key,
@@ -56,7 +89,10 @@ function h(tag, props = {}, ...children) {
     }
   }
 
-  for (const child of children.flat()) {
+  for (
+    const child
+    of children.flat()
+  ) {
     if (
       child === null ||
       child === undefined ||
@@ -75,642 +111,28 @@ function h(tag, props = {}, ...children) {
   return el;
 }
 
-function logSafe(value) {
-  try {
-    return typeof value === 'string'
-      ? value
-      : (
-          value?.message ||
-          JSON.stringify(value)
-        );
-  } catch {
-    return String(value);
-  }
-}
-
-function makeLog() {
-  const box =
-    h(
-      'pre',
-      {
-        class: 'log',
-      }
-    );
-
-  const log =
-    text => {
-      box.textContent +=
-        `${new Date().toLocaleTimeString()}  ${text}\n`;
-
-      box.scrollTop =
-        box.scrollHeight;
-
-      console.log(
-        '[VTTRPG]',
-        text
-      );
-    };
-
-  activeLog =
-    log;
-
-  return {
-    log,
-    el: box,
-  };
-}
-
-// -----------------------------------------------------------------------------
-// TURN data in join link
-// -----------------------------------------------------------------------------
-
-function encodeTurn(data) {
-  const bytes =
-    new TextEncoder().encode(
-      JSON.stringify(data)
-    );
-
-  let binary = '';
-
-  for (const byte of bytes) {
-    binary +=
-      String.fromCharCode(byte);
-  }
-
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-}
-
-function decodeTurn(value) {
-  const normalized =
-    value
-      .replace(/-/g, '+')
-      .replace(/_/g, '/');
-
-  const binary =
-    atob(
-      normalized +
-      '='.repeat(
-        (4 - normalized.length % 4) % 4
-      )
-    );
+function randomRoom() {
+  const chars =
+    'abcdefghijklmnopqrstuvwxyz0123456789';
 
   const bytes =
-    Uint8Array.from(
-      binary,
-      char => char.charCodeAt(0)
-    );
+    new Uint8Array(14);
 
-  return JSON.parse(
-    new TextDecoder().decode(bytes)
+  crypto.getRandomValues(
+    bytes
   );
+
+  return [...bytes]
+    .map(
+      byte =>
+        chars[
+          byte % chars.length
+        ]
+    )
+    .join('');
 }
 
-function getTurnFromHash() {
-  const query =
-    location.hash.split('?')[1] || '';
-
-  const params =
-    new URLSearchParams(query);
-
-  const value =
-    params.get('t');
-
-  if (!value) {
-    return null;
-  }
-
-  try {
-    return decodeTurn(value);
-  } catch {
-    return null;
-  }
-}
-
-function getTurnConfig(
-  urls,
-  username,
-  credential
-) {
-  const list =
-    urls
-      .split(',')
-      .map(x => x.trim())
-      .filter(Boolean);
-
-  if (
-    !list.length ||
-    !username ||
-    !credential
-  ) {
-    return null;
-  }
-
-  return {
-    urls: list,
-    username,
-    credential,
-  };
-}
-
-function peerOptions(turn) {
-  if (!turn) {
-    return {};
-  }
-
-  return {
-    config: {
-      iceServers: [
-        {
-          urls:
-            'stun:stun.l.google.com:19302',
-        },
-        turn,
-      ],
-
-      sdpSemantics:
-        'unified-plan',
-    },
-  };
-}
-
-// -----------------------------------------------------------------------------
-// DM Peer
-// Same basic structure as 5.5e-companion/js/peer.js
-// -----------------------------------------------------------------------------
-
-function createDMPeer(
-  room,
-  turn,
-  log,
-  onPlayer,
-  onMessage,
-  onClose
-) {
-  const peerId =
-    PREFIX + room;
-
-  const peer =
-    new Peer(
-      peerId,
-      peerOptions(turn)
-    );
-
-  const connections =
-    new Map();
-
-  peer.on(
-    'open',
-    id => {
-      log(
-        `DM PeerJS open: ${id}`
-      );
-    }
-  );
-
-  peer.on(
-    'error',
-    error => {
-      log(
-        `DM PeerJS error: ${
-          error?.type ||
-          error?.message ||
-          error
-        }`
-      );
-    }
-  );
-
-  peer.on(
-    'disconnected',
-    () => {
-      log(
-        'DM signaling disconnected; reconnecting…'
-      );
-
-      setTimeout(
-        () => {
-          try {
-            if (
-              !peer.destroyed
-            ) {
-              peer.reconnect();
-            }
-          } catch {}
-        },
-        1000
-      );
-    }
-  );
-
-  peer.on(
-    'connection',
-    connection => {
-      log(
-        `incoming player: ${connection.peer}`
-      );
-
-      connection.on(
-        'open',
-        () => {
-          connections.set(
-            connection.peer,
-            connection
-          );
-
-          log(
-            `PLAYER CONNECTED: ${connection.peer}`
-          );
-
-          onPlayer(
-            connection
-          );
-        }
-      );
-
-      connection.on(
-        'data',
-        data => {
-          if (
-            data?.type === 'ping'
-          ) {
-            try {
-              connection.send({
-                type:
-                  'pong',
-
-                ts:
-                  data.ts,
-              });
-            } catch {}
-          }
-
-          onMessage(
-            connection,
-            data
-          );
-        }
-      );
-
-      connection.on(
-        'close',
-        () => {
-          connections.delete(
-            connection.peer
-          );
-
-          log(
-            `player disconnected: ${connection.peer}`
-          );
-
-          onClose(
-            connection.peer
-          );
-        }
-      );
-
-      connection.on(
-        'error',
-        error => {
-          log(
-            `player error: ${
-              error?.type ||
-              error?.message ||
-              error
-            }`
-          );
-        }
-      );
-    }
-  );
-
-  return {
-    send(
-      connection,
-      data
-    ) {
-      if (
-        connection?.open
-      ) {
-        try {
-          connection.send(
-            data
-          );
-        } catch {}
-      }
-    },
-
-    sendAll(data) {
-      for (
-        const connection
-        of connections.values()
-      ) {
-        if (
-          connection.open
-        ) {
-          try {
-            connection.send(
-              data
-            );
-          } catch {}
-        }
-      }
-    },
-
-    destroy() {
-      for (
-        const connection
-        of connections.values()
-      ) {
-        try {
-          connection.close();
-        } catch {}
-      }
-
-      connections.clear();
-
-      try {
-        peer.destroy();
-      } catch {}
-    },
-  };
-}
-
-// -----------------------------------------------------------------------------
-// Player Peer
-// Same basic structure as 5.5e-companion/js/peer.js
-// -----------------------------------------------------------------------------
-
-function createPlayerPeer(
-  room,
-  turn,
-  log,
-  onOpen,
-  onMessage,
-  onClose
-) {
-  const hostId =
-    PREFIX + room;
-
-  const peer =
-    new Peer(
-      undefined,
-      peerOptions(turn)
-    );
-
-  let connection =
-    null;
-
-  let reconnectTimer =
-    null;
-
-  let attempt =
-    0;
-
-  function connect() {
-    if (
-      peer.destroyed
-    ) {
-      return;
-    }
-
-    attempt++;
-
-    log(
-      `connecting to ${hostId} ` +
-      `(attempt ${attempt})…`
-    );
-
-    connection =
-      peer.connect(
-        hostId,
-        {
-          reliable:
-            true,
-        }
-      );
-
-    let opened =
-      false;
-
-    const timeout =
-      setTimeout(
-        () => {
-          if (opened) {
-            return;
-          }
-
-          log(
-            'connection to DM timed out'
-          );
-
-          try {
-            connection.close();
-          } catch {}
-
-          reconnect();
-        },
-        CONNECT_TIMEOUT
-      );
-
-    connection.on(
-      'open',
-      () => {
-        opened =
-          true;
-
-        clearTimeout(
-          timeout
-        );
-
-        attempt =
-          0;
-
-        log(
-          'PLAYER CONNECTED'
-        );
-
-        onOpen(
-          connection
-        );
-      }
-    );
-
-    connection.on(
-      'data',
-      data => {
-        onMessage(
-          connection,
-          data
-        );
-      }
-    );
-
-    connection.on(
-      'close',
-      () => {
-        clearTimeout(
-          timeout
-        );
-
-        log(
-          'connection to DM closed'
-        );
-
-        onClose();
-
-        reconnect();
-      }
-    );
-
-    connection.on(
-      'error',
-      error => {
-        clearTimeout(
-          timeout
-        );
-
-        log(
-          `player connection error: ${
-            error?.type ||
-            error?.message ||
-            error
-          }`
-        );
-
-        onClose();
-
-        reconnect();
-      }
-    );
-  }
-
-  function reconnect() {
-    if (
-      reconnectTimer ||
-      peer.destroyed
-    ) {
-      return;
-    }
-
-    const delay =
-      Math.min(
-        RECONNECT_MAX,
-        RECONNECT_START *
-          2 ** Math.min(
-            attempt,
-            5
-          )
-      );
-
-    log(
-      `reconnecting in ${Math.round(delay / 1000)}s…`
-    );
-
-    reconnectTimer =
-      setTimeout(
-        () => {
-          reconnectTimer =
-            null;
-
-          connect();
-        },
-        delay
-      );
-  }
-
-  peer.on(
-    'open',
-    peerId => {
-      log(
-        `Player PeerJS open: ${peerId}`
-      );
-
-      connect();
-    }
-  );
-
-  peer.on(
-    'error',
-    error => {
-      log(
-        `Player PeerJS error: ${
-          error?.type ||
-          error?.message ||
-          error
-        }`
-      );
-    }
-  );
-
-  peer.on(
-    'disconnected',
-    () => {
-      log(
-        'Player signaling disconnected'
-      );
-
-      setTimeout(
-        () => {
-          try {
-            if (
-              !peer.destroyed &&
-              peer.disconnected
-            ) {
-              peer.reconnect();
-            }
-          } catch {}
-        },
-        1000
-      );
-    }
-  );
-
-  return {
-    send(data) {
-      if (
-        connection?.open
-      ) {
-        try {
-          connection.send(
-            data
-          );
-        } catch {}
-      }
-    },
-
-    destroy() {
-      if (
-        reconnectTimer
-      ) {
-        clearTimeout(
-          reconnectTimer
-        );
-
-        reconnectTimer =
-          null;
-      }
-
-      try {
-        connection?.close();
-      } catch {}
-
-      try {
-        peer.destroy();
-      } catch {}
-    },
-  };
-}
-
-// -----------------------------------------------------------------------------
-// Chat
-// -----------------------------------------------------------------------------
-
-function makeChat(
-  send
-) {
+function chatUi(send) {
   const box =
     h(
       'div',
@@ -726,6 +148,9 @@ function makeChat(
       {
         placeholder:
           'Message…',
+
+        maxlength:
+          '500',
       }
     );
 
@@ -800,6 +225,7 @@ function makeChat(
               class:
                 'ts',
             },
+
             new Date(
               message.ts
             ).toLocaleTimeString() +
@@ -831,84 +257,27 @@ function makeChat(
 }
 
 // -----------------------------------------------------------------------------
-// Home
+// HOME
 // -----------------------------------------------------------------------------
 
 function home() {
-  const {
-    el: logEl,
-    log,
-  } = makeLog();
+  app.replaceChildren();
 
-  const name =
-    h(
-      'input',
-      {
-        placeholder:
-          'DM name',
-        value:
-          'VTTRPG DM',
-      }
-    );
-
-  const turnUrls =
-    h(
-      'input',
-      {
-        placeholder:
-          'TURN URL, e.g. turn:your-server:3478',
-      }
-    );
-
-  const turnUser =
-    h(
-      'input',
-      {
-        placeholder:
-          'TURN username',
-      }
-    );
-
-  const turnCredential =
-    h(
-      'input',
-      {
-        type:
-          'password',
-
-        placeholder:
-          'TURN credential',
-      }
-    );
+  const logElement =
+    makeLog();
 
   const start =
-    () => {
-      const turn =
-        getTurnConfig(
-          turnUrls.value.trim(),
-          turnUser.value.trim(),
-          turnCredential.value.trim()
-        );
-
-      try {
-        localStorage.setItem(
-          DM_NAME_KEY,
-          name.value.trim() ||
-            'VTTRPG DM'
-        );
-      } catch {}
-
-      const room =
-        id(14);
-
-      const query =
-        turn
-          ? `?t=${encodeTurn(turn)}`
-          : '';
-
-      location.hash =
-        `#/dm/${room}${query}`;
-    };
+    h(
+      'button',
+      {
+        onclick:
+          () => {
+            location.hash =
+              `#/dm/${randomRoom()}`;
+          },
+      },
+      'Start DM'
+    );
 
   app.append(
     h(
@@ -918,60 +287,19 @@ function home() {
       h(
         'h2',
         {},
-        'Start DM'
+        'VTTRPG DM'
       ),
 
       h(
-        'div',
-        {
-          class:
-            'row',
-        },
-
-        name,
-
-        h(
-          'button',
-          {
-            onclick:
-              start,
-          },
-          'Start session'
-        )
-      ),
-
-      h(
-        'div',
+        'p',
         {
           class:
             'muted',
         },
-        'The session generates one permanent room link and a QR code.'
-      )
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'TURN'
+        'Start a session. The app immediately creates the QR code.'
       ),
 
-      turnUrls,
-      turnUser,
-      turnCredential,
-
-      h(
-        'div',
-        {
-          class:
-            'muted',
-        },
-        'For your iPhone ↔ Mac test, enter real TURN credentials here. Without TURN, WebRTC only works when the networks can establish a direct path.'
-      )
+      start
     ),
 
     h(
@@ -984,9 +312,12 @@ function home() {
         'Log'
       ),
 
-      logEl
+      logElement
     )
   );
+
+  logBox =
+    logElement;
 
   log(
     `VTTRPG v${VERSION} ready`
@@ -994,79 +325,199 @@ function home() {
 }
 
 // -----------------------------------------------------------------------------
-// DM view
+// DM
 // -----------------------------------------------------------------------------
 
-function dmView(
+function createDMPeer(
   room,
-  turn
+  onConnection
 ) {
-  if (cleanup) {
-    cleanup();
-  }
+  const peerId =
+    PREFIX + room;
 
+  const peer =
+    new Peer(
+      peerId,
+      PEER_CONFIG
+    );
+
+  peer.on(
+    'open',
+    id => {
+      log(
+        `DM PeerJS open: ${id}`
+      );
+    }
+  );
+
+  peer.on(
+    'error',
+    error => {
+      log(
+        `DM PeerJS error: ` +
+        `${error.type || error.message || error}`
+      );
+    }
+  );
+
+  peer.on(
+    'disconnected',
+    () => {
+      log(
+        'DM signaling disconnected'
+      );
+
+      setTimeout(
+        () => {
+          if (
+            !peer.destroyed
+          ) {
+            try {
+              peer.reconnect();
+
+              log(
+                'DM signaling reconnect requested'
+              );
+            } catch (
+              error
+            ) {
+              log(
+                `DM reconnect failed: ${error.message}`
+              );
+            }
+          }
+        },
+        1000
+      );
+    }
+  );
+
+  peer.on(
+    'connection',
+    connection => {
+      log(
+        `incoming connection from ${connection.peer}`
+      );
+
+      connection.on(
+        'iceStateChanged',
+        state => {
+          log(
+            `DM ICE: ${state}`
+          );
+        }
+      );
+
+      connection.on(
+        'open',
+        () => {
+          log(
+            `PLAYER CONNECTED: ${connection.peer}`
+          );
+
+          onConnection(
+            connection
+          );
+        }
+      );
+
+      connection.on(
+        'data',
+        data => {
+          if (
+            data?.type ===
+            'chat'
+          ) {
+            onConnection(
+              connection,
+              data
+            );
+          }
+        }
+      );
+
+      connection.on(
+        'close',
+        () => {
+          log(
+            `PLAYER DISCONNECTED: ${connection.peer}`
+          );
+        }
+      );
+
+      connection.on(
+        'error',
+        error => {
+          log(
+            `DM data error: ` +
+            `${error.type || error.message || error}`
+          );
+        }
+      );
+    }
+  );
+
+  return peer;
+}
+
+function dmView(
+  room
+) {
   app.replaceChildren();
 
-  let dmName =
-    'VTTRPG DM';
+  const logElement =
+    makeLog();
 
-  try {
-    dmName =
-      localStorage.getItem(
-        DM_NAME_KEY
-      ) ||
-      dmName;
-  } catch {}
+  logBox =
+    logElement;
 
-  const {
-    el: logEl,
-    log,
-  } = makeLog();
+  let player =
+    null;
 
   const status =
     h(
-      'span',
+      'div',
       {
         class:
           'status',
       },
-      'starting…'
+      'Starting…'
     );
 
-  const link =
+  const joinUrl =
+    `${location.origin}` +
+    `${location.pathname}` +
+    `#/join/${room}`;
+
+  const url =
     h(
       'input',
       {
         readonly:
           '',
+        value:
+          joinUrl,
       }
     );
 
   const qr =
     h(
-      'div',
+      'canvas',
       {
         id:
           'qr',
       }
     );
 
-  const playerStatus =
-    h(
-      'div',
-      {
-        class:
-          'muted',
-      },
-      'No player connected.'
-    );
-
-  let connectedPlayer =
-    null;
-
   const chat =
-    makeChat(
+    chatUi(
       text => {
+        if (
+          !player?.open
+        ) {
+          return;
+        }
+
         const message = {
           from:
             'DM',
@@ -1081,20 +532,13 @@ function dmView(
           message
         );
 
-        if (
-          connectedPlayer
-        ) {
-          transport.send(
-            connectedPlayer,
-            {
-              type:
-                'chat',
+        player.send({
+          type:
+            'chat',
 
-              msg:
-                message,
-            }
-          );
-        }
+          msg:
+            message,
+        });
       }
     );
 
@@ -1102,84 +546,63 @@ function dmView(
     false
   );
 
-  const url =
-    `${location.origin}` +
-    `${location.pathname}` +
-    `#/join/${room}` +
-    (
-      turn
-        ? `?t=${encodeTurn(turn)}`
-        : ''
-    );
-
-  link.value =
-    url;
-
-  const transport =
+  const peer =
     createDMPeer(
       room,
-      turn,
-      log,
-
-      connection => {
-        connectedPlayer =
-          connection;
-
-        status.textContent =
-          'Player connected';
-
-        playerStatus.textContent =
-          `Connected: ${connection.peer}`;
-
-        chat.enable(
-          true
-        );
-      },
-
-      (connection, data) => {
+      (
+        connection,
+        data
+      ) => {
         if (
-          data?.type ===
+          !data
+        ) {
+          player =
+            connection;
+
+          status.textContent =
+            'Player connected';
+
+          chat.enable(
+            true
+          );
+
+          return;
+        }
+
+        if (
+          data.type ===
           'chat'
         ) {
           chat.add(
             data.msg
           );
+
+          // Echo chat to all other participants.
+          if (
+            player?.open
+          ) {
+            player.send(
+              data
+            );
+          }
         }
-      },
-
-      () => {
-        connectedPlayer =
-          null;
-
-        status.textContent =
-          'Player disconnected';
-
-        playerStatus.textContent =
-          'No player connected.';
-
-        chat.enable(
-          false
-        );
       }
     );
 
-  if (
-    window.QRCode
-  ) {
-    new QRCode(
-      qr,
-      {
-        text:
-          url,
+  QRCode.toCanvas(
+    qr,
+    joinUrl,
+    {
+      width:
+        240,
 
-        width:
-          220,
+      margin:
+        2,
+    }
+  );
 
-        height:
-          220,
-      }
-    );
-  }
+  status.textContent =
+    'Waiting for player…';
 
   app.append(
     h(
@@ -1189,10 +612,18 @@ function dmView(
       h(
         'h2',
         {},
-        dmName
+        'DM session'
       ),
 
       status,
+
+      h(
+        'p',
+        {},
+        'Scan this QR code:'
+      ),
+
+      qr,
 
       h(
         'div',
@@ -1201,7 +632,7 @@ function dmView(
             'row',
         },
 
-        link,
+        url,
 
         h(
           'button',
@@ -1210,22 +641,24 @@ function dmView(
               async () => {
                 try {
                   await navigator.clipboard.writeText(
-                    url
+                    joinUrl
                   );
 
                   log(
                     'link copied'
                   );
-                } catch {}
+                } catch (
+                  error
+                ) {
+                  log(
+                    `copy failed: ${error.message}`
+                  );
+                }
               },
           },
           'Copy link'
         )
-      ),
-
-      qr,
-
-      playerStatus
+      )
     ),
 
     h(
@@ -1251,69 +684,72 @@ function dmView(
         'Log'
       ),
 
-      logEl
+      logElement
     )
   );
-
-  cleanup =
-    () => {
-      transport.destroy();
-      connectedPlayer =
-        null;
-    };
 
   log(
     `DM room: ${room}`
   );
 
   log(
-    `DM peer ID: ${PREFIX}${room}`
+    `DM peer id: ${PREFIX}${room}`
   );
 
   log(
-    turn
-      ? `TURN configured: ${turn.urls.join(', ')}`
-      : 'No TURN configured'
+    'ICE policy: relay only'
   );
+
+  log(
+    'TURN: turn.anyfirewall.com:443/tcp'
+  );
+
+  cleanup =
+    () => {
+      try {
+        peer.destroy();
+      } catch {}
+    };
 }
 
 // -----------------------------------------------------------------------------
-// Player view
+// PLAYER
 // -----------------------------------------------------------------------------
 
 function playerView(
   room
 ) {
-  if (cleanup) {
-    cleanup();
-  }
-
   app.replaceChildren();
 
-  const {
-    el: logEl,
-    log,
-  } = makeLog();
+  const logElement =
+    makeLog();
 
-  const turn =
-    getTurnFromHash();
+  logBox =
+    logElement;
 
   const status =
     h(
-      'span',
+      'div',
       {
         class:
           'status',
       },
-      'connecting…'
+      'Connecting…'
     );
 
-  let peer;
+  let connection =
+    null;
 
   const chat =
-    makeChat(
+    chatUi(
       text => {
-        peer.send({
+        if (
+          !connection?.open
+        ) {
+          return;
+        }
+
+        connection.send({
           type:
             'chat',
 
@@ -1334,45 +770,164 @@ function playerView(
     false
   );
 
-  peer =
-    createPlayerPeer(
-      room,
-      turn,
-      log,
+  const peer =
+    new Peer(
+      undefined,
+      PEER_CONFIG
+    );
 
-      connection => {
-        status.textContent =
-          'Connected';
+  peer.on(
+    'open',
+    id => {
+      log(
+        `Player PeerJS open: ${id}`
+      );
 
-        chat.enable(
-          true
+      log(
+        `connecting to ${PREFIX}${room}`
+      );
+
+      connection =
+        peer.connect(
+          PREFIX + room,
+          {
+            reliable:
+              true,
+          }
         );
 
-        log(
-          `data channel open to DM`
-        );
-      },
+      let opened =
+        false;
 
-      (connection, data) => {
-        if (
-          data?.type ===
-          'chat'
-        ) {
-          chat.add(
-            data.msg
+      const timer =
+        setTimeout(
+          () => {
+            if (
+              !opened
+            ) {
+              status.textContent =
+                'Connection failed';
+
+              log(
+                'connection timed out'
+              );
+            }
+          },
+          CONNECT_TIMEOUT
+        );
+
+      connection.on(
+        'iceStateChanged',
+        state => {
+          log(
+            `Player ICE: ${state}`
           );
         }
-      },
+      );
 
-      () => {
-        status.textContent =
-          'Disconnected – reconnecting…';
+      connection.on(
+        'open',
+        () => {
+          opened =
+            true;
 
-        chat.enable(
-          false
-        );
-      }
-    );
+          clearTimeout(
+            timer
+          );
+
+          status.textContent =
+            'Connected';
+
+          chat.enable(
+            true
+          );
+
+          log(
+            'PLAYER CONNECTED'
+          );
+        }
+      );
+
+      connection.on(
+        'data',
+        data => {
+          if (
+            data?.type ===
+            'chat'
+          ) {
+            chat.add(
+              data.msg
+            );
+          }
+        }
+      );
+
+      connection.on(
+        'close',
+        () => {
+          status.textContent =
+            'Disconnected';
+
+          chat.enable(
+            false
+          );
+
+          log(
+            'connection closed'
+          );
+        }
+      );
+
+      connection.on(
+        'error',
+        error => {
+          status.textContent =
+            'Connection error';
+
+          log(
+            `data error: ` +
+            `${error.type || error.message || error}`
+          );
+        }
+      );
+    }
+  );
+
+  peer.on(
+    'error',
+    error => {
+      status.textContent =
+        'PeerJS error';
+
+      log(
+        `Player PeerJS error: ` +
+        `${error.type || error.message || error}`
+      );
+    }
+  );
+
+  peer.on(
+    'disconnected',
+    () => {
+      log(
+        'Player signaling disconnected'
+      );
+
+      setTimeout(
+        () => {
+          if (
+            !peer.destroyed &&
+            peer.disconnected
+          ) {
+            try {
+              peer.reconnect();
+            } catch {}
+          }
+        },
+        1000
+      );
+    }
+  );
 
   app.append(
     h(
@@ -1388,7 +943,7 @@ function playerView(
       status,
 
       h(
-        'div',
+        'p',
         {
           class:
             'muted',
@@ -1420,24 +975,28 @@ function playerView(
         'Log'
       ),
 
-      logEl
+      logElement
     )
+  );
+
+  log(
+    `room: ${room}`
+  );
+
+  log(
+    'ICE policy: relay only'
+  );
+
+  log(
+    'TURN: turn.anyfirewall.com:443/tcp'
   );
 
   cleanup =
     () => {
-      peer.destroy();
+      try {
+        peer.destroy();
+      } catch {}
     };
-
-  log(
-    turn
-      ? `TURN configuration received from DM link`
-      : 'No TURN configuration in DM link'
-  );
-
-  log(
-    `connecting to ${PREFIX}${room}`
-  );
 }
 
 // -----------------------------------------------------------------------------
@@ -1445,21 +1004,20 @@ function playerView(
 // -----------------------------------------------------------------------------
 
 function route() {
-  if (cleanup) {
-    cleanup();
-    cleanup = null;
-  }
+  cleanup?.();
 
-  activeLog = null;
+  cleanup =
+    null;
 
-  app.replaceChildren();
+  activeLog =
+    null;
 
-  const [path] =
+  const path =
     (
       location.hash
         .replace(/^#/, '') ||
       '/'
-    ).split('?');
+    ).split('?')[0];
 
   const dm =
     path.match(
@@ -1473,8 +1031,7 @@ function route() {
 
   if (dm) {
     dmView(
-      dm[1],
-      getTurnFromHash()
+      dm[1]
     );
 
     return;
