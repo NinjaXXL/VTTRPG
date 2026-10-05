@@ -3,30 +3,37 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VTTRPG Skeleton v0.10.0</title>
+  <title>VTTRPG v0.11.0</title>
 
   <style>
     body {
       font-family: system-ui, sans-serif;
-      max-width: 880px;
+      max-width: 760px;
       margin: 1rem auto;
       padding: 0 1rem;
       line-height: 1.4;
     }
 
-    h1 { font-size: 1.3rem; }
-    h2 { font-size: 1.05rem; margin: 1rem 0 .3rem; }
+    h1 {
+      font-size: 1.3rem;
+    }
+
+    h2 {
+      font-size: 1.05rem;
+      margin: 1rem 0 .3rem;
+    }
 
     section {
       border: 1px solid #8884;
       border-radius: 6px;
-      padding: .6rem .8rem;
+      padding: .7rem .8rem;
       margin: .8rem 0;
     }
 
-    input, select, button {
+    input,
+    button {
       font: inherit;
-      padding: .25rem .5rem;
+      padding: .35rem .5rem;
       margin: .1rem;
     }
 
@@ -37,46 +44,26 @@
 
     .row {
       display: flex;
-      gap: .3rem;
+      gap: .35rem;
       align-items: center;
       flex-wrap: wrap;
     }
 
-    .row input:not([type]) {
-      flex: 1;
-      min-width: 8rem;
-    }
-
     .chat {
-      height: 14rem;
-      overflow-y: auto;
+      height: 16rem;
+      overflow: auto;
       border: 1px solid #8886;
-      padding: .3rem;
+      padding: .4rem;
       border-radius: 4px;
     }
 
-    .msg .ts {
+    .msg {
+      margin: .15rem 0;
+    }
+
+    .ts {
       opacity: .5;
       font-size: .8em;
-    }
-
-    .msg.sys {
-      opacity: .65;
-      font-style: italic;
-    }
-
-    .log {
-      height: 18rem;
-      overflow-y: auto;
-      font-size: .78rem;
-      background: #8881;
-      padding: .3rem;
-      margin: 0;
-      white-space: pre-wrap;
-    }
-
-    .status {
-      font-weight: 600;
     }
 
     .muted {
@@ -84,53 +71,38 @@
       font-size: .9em;
     }
 
-    footer {
-      margin: 2rem 0 1rem;
-      text-align: center;
-      border-top: 1px solid #8884;
-      padding-top: .5rem;
+    .log {
+      height: 12rem;
+      overflow: auto;
+      background: #8881;
+      padding: .4rem;
+      white-space: pre-wrap;
+      font: .76rem ui-monospace, monospace;
     }
 
-    .tag {
-      font-size: .75em;
-      border: 1px solid #8888;
-      border-radius: 3px;
-      padding: 0 .3em;
-      margin-left: .3em;
+    .status {
+      font-weight: 700;
     }
 
     #qr {
       margin-top: .6rem;
     }
-
-    .turn-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: .2rem;
-    }
-
-    .turn-grid input {
-      width: 100%;
-      box-sizing: border-box;
-      margin-left: 0;
-      margin-right: 0;
-    }
   </style>
 </head>
 
 <body>
-  <h1>VTTRPG – Skeleton v0.10.0</h1>
+  <h1>VTTRPG v0.11.0</h1>
 
   <div id="app">
     Loading…
   </div>
 
   <footer id="version" class="muted">
-    VTTRPG skeleton v0.10.0
+    VTTRPG v0.11.0
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js"></script>
-  <script type="module" src="./app.js?v=0.10.0"></script>
+  <script type="module" src="./app.js?v=0.11.0"></script>
 </body>
 </html>
