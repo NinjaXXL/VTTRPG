@@ -2,35 +2,240 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="VTTRPG browser-based DM and player session using PeerJS and WebRTC">
-  <title>VTTRPG Skeleton v0.7.0</title>
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+
+  <title>VTTRPG Skeleton v0.7.1</title>
+
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; max-width: 880px; margin: 1rem auto; padding: 0 1rem; line-height: 1.4; }
-    h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1rem 0 .3rem; }
-    section { border: 1px solid #8884; border-radius: 6px; padding: .6rem .8rem; margin: .8rem 0; }
-    input, select, button { font: inherit; padding: .25rem .5rem; margin: .1rem; }
-    input[readonly] { width: 100%; box-sizing: border-box; }
-    .row { display: flex; gap: .3rem; align-items: center; flex-wrap: wrap; }
-    .row input:not([type]) { flex: 1; min-width: 8rem; }
-    .chat { height: 14rem; overflow-y: auto; border: 1px solid #8886; padding: .3rem; border-radius: 4px; }
-    .msg .ts { opacity: .5; font-size: .8em; } .msg.sys { opacity: .65; font-style: italic; }
-    .log { height: 18rem; overflow-y: auto; font-size: .78rem; background: #8881; padding: .3rem; margin: 0; white-space: pre-wrap; }
-    .status { font-weight: 600; } .muted { opacity: .65; font-size: .9em; }
-    footer { margin: 2rem 0 1rem; text-align: center; border-top: 1px solid #8884; padding-top: .5rem; }
-    .tag { font-size: .75em; border: 1px solid #8888; border-radius: 3px; padding: 0 .3em; margin-left: .3em; }
-    .notice { border-left: 3px solid currentColor; padding-left: .6rem; }
+    :root {
+      color-scheme: light dark;
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 980px;
+      margin: 1rem auto;
+      padding: 0 1rem;
+      line-height: 1.4;
+    }
+
+    h1 {
+      font-size: 1.35rem;
+      margin-bottom: .4rem;
+    }
+
+    h2 {
+      font-size: 1.05rem;
+      margin: 1rem 0 .35rem;
+    }
+
+    section {
+      border: 1px solid #8884;
+      border-radius: 8px;
+      padding: .7rem .8rem;
+      margin: .8rem 0;
+    }
+
+    input,
+    select,
+    button,
+    textarea {
+      font: inherit;
+      padding: .35rem .55rem;
+      margin: .15rem;
+      box-sizing: border-box;
+    }
+
+    input:not([type="checkbox"]):not([type="file"]),
+    textarea,
+    select {
+      max-width: 100%;
+    }
+
+    input[readonly] {
+      width: 100%;
+    }
+
+    label {
+      display: block;
+      margin: .35rem 0;
+    }
+
+    label > input,
+    label > select,
+    label > textarea {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      margin-left: 0;
+    }
+
+    input[type="checkbox"] {
+      width: auto;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: default;
+      opacity: .55;
+    }
+
+    .row {
+      display: flex;
+      gap: .3rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .row > input:not([type]),
+    .row > input[type="text"] {
+      flex: 1;
+      min-width: 8rem;
+    }
+
+    .muted {
+      opacity: .65;
+      font-size: .9em;
+    }
+
+    .status {
+      font-weight: 700;
+    }
+
+    .tag {
+      display: inline-block;
+      font-size: .75em;
+      border: 1px solid #8888;
+      border-radius: 999px;
+      padding: .05em .45em;
+      margin-left: .25rem;
+    }
+
+    .chat {
+      height: 16rem;
+      overflow-y: auto;
+      border: 1px solid #8886;
+      padding: .4rem;
+      border-radius: 5px;
+      background: #8881;
+    }
+
+    .msg {
+      padding: .12rem 0;
+      overflow-wrap: anywhere;
+    }
+
+    .msg .ts {
+      opacity: .5;
+      font-size: .8em;
+      margin-right: .3rem;
+    }
+
+    .msg.sys {
+      opacity: .7;
+      font-style: italic;
+    }
+
+    .log {
+      height: 22rem;
+      overflow-y: auto;
+      font-size: .76rem;
+      background: #8881;
+      padding: .4rem;
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .player-row {
+      border-top: 1px solid #8883;
+      padding: .5rem 0;
+    }
+
+    .player-row:first-child {
+      border-top: 0;
+    }
+
+    .player-main {
+      margin-bottom: .25rem;
+    }
+
+    .player-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .15rem;
+    }
+
+    .notice {
+      border-left: 4px solid #8888;
+      padding: .4rem .6rem;
+      margin: .4rem 0;
+      background: #8881;
+    }
+
+    .qr {
+      margin-top: .5rem;
+      display: inline-block;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: .7rem;
+    }
+
+    footer {
+      margin: 2rem 0 1rem;
+      text-align: center;
+      border-top: 1px solid #8884;
+      padding-top: .5rem;
+    }
+
+    code {
+      background: #8882;
+      padding: .05rem .2rem;
+      border-radius: 3px;
+    }
   </style>
 </head>
-<body>
-  <h1>VTTRPG &ndash; Skeleton v0.7.0</h1>
-  <div id="app">Loading&hellip; (if this stays, check the browser console)</div>
-  <footer id="version" class="muted">VTTRPG skeleton v0.7.0 &middot; PeerJS 1.5.5</footer>
 
-  <!-- PeerJS is used for signaling; the actual game traffic is WebRTC data channels. -->
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js"></script>
-  <script type="module" src="./app.js?v=0.7.0"></script>
+<body>
+  <h1>VTTRPG – Skeleton</h1>
+
+  <div id="app">
+    Loading…
+    <div class="muted">
+      If this remains visible, check the browser console.
+    </div>
+  </div>
+
+  <footer
+    id="version"
+    class="muted"
+  >
+    VTTRPG skeleton v0.7.1
+  </footer>
+
+  <!-- PeerJS signaling + WebRTC wrapper -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"
+  ></script>
+
+  <!-- QR code generation -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js"
+  ></script>
+
+  <!-- Application -->
+  <script
+    type="module"
+    src="./app.js?v=0.7.1"
+  ></script>
 </body>
 </html>
