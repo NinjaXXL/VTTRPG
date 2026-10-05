@@ -13,7 +13,7 @@ Bare-bones test of the core idea: a DM hosts everything from their own browser o
 - **Player:** 10 s timeout per attempt, then **automatic retries with exponential backoff** (1 s up to 30 s), also when the tab becomes visible or the network comes back. After a drop it re-joins automatically with its token and keeps its Player number. Heartbeat ping every 30 s.
 - Closing the session and reopening it later lets waiting players reconnect by themselves.
 
-Default ICE setup = PeerJS defaults (Google STUN + PeerJS shared TURN servers). Optional: add your own TURN server in the DM view, or tick **Relay-only test** to check whether TURN works at all.
+Default ICE setup = PeerJS defaults, which in practice means Google STUN only: PeerJS announced in Dec 2023 that its free TURN servers are discontinued, although the library still lists them. So **only direct connections work by default** (same Wi-Fi, or networks that allow hole punching). Networks that cannot connect directly need a **TURN relay**: get free credentials from a TURN provider, paste them into the DM view, press **Test TURN credentials** (checks them without a second device), then open the session and copy the NEW join link (the TURN settings travel inside it). **Relay-only test** forces all traffic through TURN to prove it is really used.
 
 ## Run locally
 ES modules need http (not `file://`):

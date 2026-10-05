@@ -6,7 +6,7 @@
 //  - players ping every 30 s, the DM answers and drops connections silent for 60 s
 // On top of that the skeleton adds: approval lobby, numbered players, kick/ban, chat with history, export/import.
 
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.6.1';
 const PEERJS_VERSION = '1.5.5';                   // loaded by index.html
 
 const PEER_PREFIX = 'vttrpg-';
@@ -98,13 +98,11 @@ const parseOpts = q => {
 // Default = exactly the reference setup (PeerJS defaults: cloud signaling, Google STUN + PeerJS shared TURN).
 // Only when the DM adds a TURN server or ticks the relay test do we pass an explicit ICE configuration.
 function peerOptions({ turn, relayOnly, log }) {
-  if (!turn && !relayOnly) { log('ICE servers: PeerJS defaults (Google STUN + PeerJS shared TURN eu-0/us-0)'); return {}; }
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
-  ];
+  if (!turn && !relayOnly) { log('ICE servers: PeerJS defaults = Google STUN only in practice (the PeerJS shared TURN servers in the defaults were discontinued in 2023). No relay available: networks that cannot connect directly will fail.'); return {}; }
+  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }];
   if (turn) iceServers.push(turn);
-  log(`ICE servers: Google STUN, PeerJS shared TURN${turn ? ', custom TURN ' + turn.urls.join(',') : ''}${relayOnly ? ' | RELAY-ONLY test (direct paths disabled)' : ''}`);
+  log(`ICE servers: Google/Cloudflare STUN${turn ? ', custom TURN ' + turn.urls.join(',') : ''}${relayOnly ? ' | RELAY-ONLY test (direct paths disabled)' : ''}`);
+  if (relayOnly && !turn) log('WARNING: relay-only mode without a TURN server cannot connect.');
   return { config: { iceServers, sdpSemantics: 'unified-plan', ...(relayOnly ? { iceTransportPolicy: 'relay' } : {}) } };
 }
 
@@ -466,6 +464,22 @@ function viewDM(cid) {
   };
   chat.setEnabled(false);
 
+  // Checks the TURN credentials on their own: asks the server for a relay address. No second device needed.
+  const turnTestEl = h('span', { class: 'muted' });
+  const testTurn = async () => {
+    const turn = readTurn();
+    if (!turn) { turnTestEl.textContent = 'Enter TURN URL, username and credential first.'; return; }
+    turnTestEl.textContent = 'testing… (up to 10 s)'; log(`TURN test: asking ${turn.urls.join(', ')} for a relay address…`);
+    const pc = new RTCPeerConnection({ iceServers: [turn], iceTransportPolicy: 'relay' });
+    pc.createDataChannel('turn-test');
+    let found = false, lastErr = '';
+    const finish = (ok, msg) => { try { pc.close(); } catch { } turnTestEl.textContent = (ok ? 'OK: ' : 'FAILED: ') + msg; log('TURN test ' + (ok ? 'OK' : 'FAILED') + ': ' + msg); };
+    const timer = setTimeout(() => { if (!found) finish(false, 'no relay address received' + (lastErr ? ` (last error: ${lastErr})` : '') + '. Check URL, username, credential, or the server is blocked on this network.'); }, 10000);
+    pc.addEventListener('icecandidate', e => { if (!found && e.candidate && / typ relay /.test(e.candidate.candidate)) { found = true; clearTimeout(timer); finish(true, 'the TURN server issued a relay address, so URL and credentials work.'); } });
+    pc.addEventListener('icecandidateerror', e => { lastErr = `${e.errorCode || ''} ${e.errorText || ''}`.trim(); });
+    try { await pc.setLocalDescription(await pc.createOffer()); } catch (e) { clearTimeout(timer); finish(false, e.message); }
+  };
+
   const sendTo = (data, pid) => dmPeer?.send(data, pid);
   const approvedPids = () => [...peers].filter(([, p]) => p.status === 'approved').map(([pid]) => pid);
   const isOnline = tok => [...peers.values()].some(p => p.token === tok && p.status === 'approved');
@@ -625,8 +639,9 @@ function viewDM(cid) {
       h('div', { class: 'muted' }, 'Players open the link, enter a name and this PIN. The link stays the same for the campaign; the PIN is per session. Keep this tab open and in the foreground while playing. PeerJS only introduces the browsers; chat and game data use the direct WebRTC channel.')),
     h('section', {}, h('h2', {}, 'TURN relay (optional) and relay test'),
       h('div', { class: 'row' }, turnUrls, turnUser, turnCred),
+      h('div', { class: 'row' }, h('button', { onclick: testTurn }, 'Test TURN credentials'), turnTestEl),
       h('div', { class: 'row' }, relayChk, 'Relay-only test: force all traffic through TURN (if this connects, TURN works; if not, TURN is unreachable). Applies to the next session you open.'),
-      h('div', { class: 'muted' }, 'PeerJS already uses its free shared TURN servers by default. Custom TURN settings are saved in this browser and added to the join link.')),
+      h('div', { class: 'muted' }, 'Without a TURN server only direct connections work (PeerJS discontinued its free TURN in 2023). Get free credentials from a TURN provider, paste them above and press the test button. They are saved in this browser and added to the join link (open the session again and copy the NEW link).')),
     h('section', {}, h('h2', {}, 'Lobby (waiting for approval)'), lobbyEl),
     h('section', {}, h('h2', {}, 'Players of this campaign'), playersEl),
     h('section', {}, h('h2', {}, 'Chat (stored in this browser)'), chat.el),
