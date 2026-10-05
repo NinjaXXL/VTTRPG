@@ -1,7 +1,7 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via PeerJS.
 // The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.5.1';
 const PEERJS_VERSION = '1.5.5';
 
 // ---------- global diagnostics: forward warnings/errors/online state into the visible log ----------
@@ -17,16 +17,87 @@ addEventListener('online', () => activeLog?.('browser went ONLINE'));
 addEventListener('offline', () => activeLog?.('browser went OFFLINE'));
 document.addEventListener('visibilitychange', () => activeLog?.('tab is now ' + document.visibilityState));
 
+// Log every WebRTC connection attempt: ICE servers, candidate types (host/srflx/relay), checks and the path finally used.
+// host/srflx = direct connection, relay = through a TURN server. TURN problems show up as ICE candidate errors.
+if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
+  window.__vttrpgPcPatched = true;
+  const NativePC = window.RTCPeerConnection; let pcCount = 0;
+  window.RTCPeerConnection = class extends NativePC {
+    constructor(cfg, ...rest) {
+      super(cfg, ...rest);
+      const id = ++pcCount, L = m => activeLog?.(`rtc#${id}: ${m}`);
+      const kinds = {};
+      (cfg?.iceServers || []).flatMap(s => [].concat(s.urls || s.url || [])).forEach(u => { const k = String(u).split(':')[0]; kinds[k] = (kinds[k] || 0) + 1; });
+      L(`new connection; ICE servers: ${JSON.stringify(kinds)}${cfg?.iceTransportPolicy ? ', policy=' + cfg.iceTransportPolicy : ''}`);
+      const cand = {}, remote = {};
+      const typeOf = c => / typ (\w+)/.exec(c || '')?.[1];
+      const summarize = async (label = 'FAILURE SUMMARY') => {
+        try {
+          const st = await this.getStats(); const lines = [];
+          st.forEach(r => { if (r.type === 'candidate-pair') { const l = st.get(r.localCandidateId), q = st.get(r.remoteCandidateId); lines.push(`${r.nominated ? '*' : ''}${r.state} ${l?.candidateType}->${q?.candidateType} checks sent/answered ${r.requestsSent || 0}/${r.responsesReceived || 0}`); } });
+          L(`${label}: ${lines.length} candidate pair(s) [${lines.join('; ')}]; remote candidates seen ${JSON.stringify(remote)}; conn=${this.connectionState}`);
+        } catch (e) { L('stats error: ' + e.message); }
+      };
+      this.addEventListener('icecandidate', e => {
+        if (e.candidate) { const k = `${typeOf(e.candidate.candidate) || '?'}/${e.candidate.protocol || '?'}`; cand[k] = (cand[k] || 0) + 1; }
+        else L(`ICE gathering finished; local candidates: ${JSON.stringify(cand)}`);
+      });
+      this.addEventListener('icecandidateerror', e => L(`ICE candidate error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
+      this.addEventListener('iceconnectionstatechange', () => {
+        L(`ice=${this.iceConnectionState}`);
+        if (this.iceConnectionState === 'checking') [3000, 8000, 12000].forEach(t => setTimeout(() => { if (this.iceConnectionState === 'checking') summarize(`in-flight @${t / 1000}s`); }, t));
+      });
+      this.addEventListener('connectionstatechange', () => {
+        L(`conn=${this.connectionState}`);
+        if (this.connectionState === 'failed') summarize();
+        if (this.connectionState === 'connected') setTimeout(() => summarize('CONNECTED, path used (* = selected)'), 500);
+      });
+      const origSRD = this.setRemoteDescription.bind(this);
+      this.setRemoteDescription = d => {
+        (d?.sdp || '').split('\n').filter(l => l.startsWith('a=candidate')).forEach(l => { const t = typeOf(l); if (t) remote[t] = (remote[t] || 0) + 1; });
+        L(`remote ${d?.type} set; remote candidates so far: ${JSON.stringify(remote)}`);
+        return origSRD(d);
+      };
+      const origAIC = this.addIceCandidate.bind(this);
+      this.addIceCandidate = c => {
+        const t = typeOf(c?.candidate); if (t) remote[t] = (remote[t] || 0) + 1;
+        return origAIC(c).then(r => r, e => { L(`addIceCandidate REJECTED: ${e.name}: ${e.message}`); throw e; });
+      };
+    }
+  };
+}
+
 const footer = document.getElementById('version');
 if (footer) footer.textContent = `VTTRPG skeleton v${APP_VERSION} · PeerJS ${PEERJS_VERSION}`;
 
 const short = id => String(id).slice(0, 6);
 
+// Optional TURN relay + relay-only test flag travel in the join link (URL hash, never sent to a server)
+const b64e = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64d = s => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))));
+const parseOpts = q => {
+  const p = new URLSearchParams(q); let turn = null;
+  try {
+    const o = p.get('t') && b64d(p.get('t'));
+    const urls = [].concat(o?.urls || []).map(String).filter(u => /^(turns?|stuns?):/.test(u));
+    if (urls.length) turn = { urls, username: String(o.username || ''), credential: String(o.credential || '') };
+  } catch { }
+  return { turn, relayOnly: p.get('r') === '1' };
+};
+
 // PeerJS transport. The public cloud only introduces the browsers; campaign traffic stays on WebRTC data channels.
-async function connectPeer(roomId, { log, onJoin, onLeave, onMessage, host = false }) {
+async function connectPeer(roomId, { log, onJoin, onLeave, onMessage, host = false, turn = null, relayOnly = false }) {
   if (!window.Peer) throw new Error('PeerJS could not be loaded. Check the network connection and reload.');
-  const connections = new Map(); let sent = 0, received = 0, leaving = false;
-  const peer = new window.Peer(host ? roomId : undefined, { debug: 0 });
+  const connections = new Map(); let sent = 0, received = 0, leaving = false, lastIce = 'n/a';
+  // Same defaults as PeerJS 1.5.5 (Google STUN + PeerJS shared TURN), plus Cloudflare STUN and an optional custom TURN from the DM.
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+  ];
+  if (turn) iceServers.push(turn);
+  log(`ICE servers: Google/Cloudflare STUN, PeerJS shared TURN (eu-0, us-0)${turn ? ', custom TURN ' + turn.urls.join(',') : ''}${relayOnly ? ' | RELAY-ONLY test mode (direct paths disabled)' : ''}`);
+  log(`browser: ${navigator.userAgent}`);
+  const peer = new window.Peer(host ? roomId : undefined, { debug: 0, config: { iceServers, sdpSemantics: 'unified-plan', ...(relayOnly ? { iceTransportPolicy: 'relay' } : {}) } });
   const waitForPeer = () => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Timed out while registering the browser connection.')), 20000);
     peer.once('open', id => { clearTimeout(timer); resolve(id); });
@@ -37,17 +108,19 @@ async function connectPeer(roomId, { log, onJoin, onLeave, onMessage, host = fal
     connection.on('open', () => { connections.set(pid, connection); log(`WebRTC data channel open: ${short(pid)}`); onJoin(pid); });
     connection.on('data', data => { received++; log(`← ${short(pid)} ${data?.t ?? typeof data}`); onMessage(data, pid); });
     connection.on('close', () => { if (connections.delete(pid)) { log(`peer left: ${short(pid)}`); onLeave(pid); } });
-    connection.on('error', error => log(`connection error ${short(pid)}: ${safeStr(error)}`));
+    connection.on('error', error => log(`connection error ${short(pid)}: ${error?.type || ''} ${safeStr(error)}`));
+    connection.on('iceStateChanged', s => { lastIce = s; log(`${short(pid)} PeerJS ICE state: ${s}`); });
   };
   peer.on('connection', bind);
-  peer.on('error', error => { if (!leaving) log('PeerJS error: ' + safeStr(error)); });
+  peer.on('error', error => { if (!leaving) log(`PeerJS error (${error?.type || 'unknown'}): ` + safeStr(error)); });
+  peer.on('disconnected', () => { if (!leaving) log('lost the connection to the PeerJS signaling server'); });
   const ownId = await waitForPeer();
   log(`PeerJS ready as ${short(ownId)}${host ? ' (DM host)' : ' (Player)'}`);
   if (!host) {
     const connection = peer.connect(roomId, { reliable: true, serialization: 'json' });
     bind(connection);
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('The DM did not answer. Is the session still open?')), 25000);
+      const timer = setTimeout(() => reject(new Error(`The DM did not answer within 25 s (last ICE state: ${lastIce}). Is the session still open? If ICE failed, the networks cannot connect directly: try a TURN server.`)), 25000);
       connection.once('open', () => { clearTimeout(timer); resolve(); });
       connection.once('error', error => { clearTimeout(timer); reject(error); });
     });
@@ -67,6 +140,7 @@ const LS_CAMPAIGNS = 'vttrpg:campaigns';       // DM side: all campaigns (localS
 const LS_NAME = 'vttrpg:playerName';           // player side: last used name
 const LS_TOKEN = 'vttrpg:playerToken';         // player side: one small persistent secret ID
 const JOIN_TIMEOUT_MS = 25000;
+const LS_TURN = 'vttrpg:turn';               // DM side: optional TURN relay settings
 
 const rid = (n = 12) => {
   const a = new Uint8Array(n); crypto.getRandomValues(a);
@@ -137,9 +211,9 @@ function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   activeLog = null;
   $app.replaceChildren();
-  const hash = location.hash.replace(/^#/, '') || '/';
+  const [hash, query = ''] = (location.hash.replace(/^#/, '') || '/').split('?');
   let m;
-  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)$/))) return viewPlayer(m[1], m[2]);
+  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)$/))) return viewPlayer(m[1], m[2], parseOpts(query));
   if ((m = hash.match(/^\/dm\/([a-z0-9]+)$/))) return viewDM(m[1]);
   viewHome();
 }
@@ -207,6 +281,16 @@ function viewDM(cid) {
   const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); log('join link copied'); } }, 'Copy link');
   const lobbyEl = h('div'), playersEl = h('div');
   const qrEl = h('div');
+  const savedTurn = (() => { try { return JSON.parse(localStorage.getItem(LS_TURN)) || {}; } catch { return {}; } })();
+  const turnUrls = h('input', { placeholder: 'turn:host:3478, turns:host:443?transport=tcp', value: savedTurn.urls || '' });
+  const turnUser = h('input', { placeholder: 'username', value: savedTurn.username || '' });
+  const turnCred = h('input', { placeholder: 'credential', value: savedTurn.credential || '' });
+  const relayChk = h('input', { type: 'checkbox' });
+  const readTurn = () => {
+    localStorage.setItem(LS_TURN, JSON.stringify({ urls: turnUrls.value, username: turnUser.value, credential: turnCred.value }));
+    const urls = turnUrls.value.split(',').map(s => s.trim()).filter(Boolean);
+    return urls.length ? { urls, username: turnUser.value.trim(), credential: turnCred.value.trim() } : null;
+  };
   chat.setEnabled(false);
 
   const sendTo = (data, pid) => conn?.send(data, pid);
@@ -220,10 +304,11 @@ function viewDM(cid) {
     if (opening) return;
     opening = true; toggleBtn.disabled = true;
     const s = { id: rid(20), secret: rid(24), mode: modeSel.value };
+    const turn = readTurn(), relayOnly = relayChk.checked;
     log(`opening PeerJS session: mode=${s.mode}, host=${short(s.id)}`);
     try {
       conn = await connectPeer(s.id, {
-        log, host: true,
+        log, host: true, turn, relayOnly,
         onJoin: pid => log('peer connected ' + short(pid) + ' – waiting for its join request'),
         onLeave: pid => {
           const p = peers.get(pid);
@@ -236,7 +321,10 @@ function viewDM(cid) {
       log('COULD NOT OPEN SESSION: ' + e.message); opening = false; toggleBtn.disabled = false; return;
     }
     session = s; opening = false; toggleBtn.disabled = false;
-    linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}`;
+    const qs = [turn ? 't=' + b64e(turn) : '', relayOnly ? 'r=1' : ''].filter(Boolean).join('&');
+    linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}${qs ? '?' + qs : ''}`;
+    if (turn) log('join link includes the custom TURN settings (anyone with the link can use that TURN account)');
+    if (relayOnly) log('RELAY-ONLY test mode is on: both sides must connect through a TURN server');
     qrEl.replaceChildren();
     if (window.QRCode) new window.QRCode(qrEl, { text: linkIn.value, width: 220, height: 220 });
     else qrEl.append('QR code library could not be loaded. Use the link instead.');
@@ -350,6 +438,10 @@ function viewDM(cid) {
     h('section', {}, h('h2', {}, 'Session'),
       h('div', { class: 'row' }, 'Join mode:', modeSel, toggleBtn), h('div', { class: 'row' }, linkIn, copyBtn), qrEl,
       h('div', { class: 'muted' }, 'Scan the QR code or open the link on a player device. Keep this tab open while playing. PeerJS only introduces the browsers; chat and game data use the direct WebRTC channel.')),
+    h('section', {}, h('h2', {}, 'TURN relay (optional) and relay test'),
+      h('div', { class: 'row' }, turnUrls, turnUser, turnCred),
+      h('div', { class: 'row' }, relayChk, 'Relay-only test: force all traffic through TURN (if this connects, TURN works; if not, TURN is unreachable). Applies to the next session you open.'),
+      h('div', { class: 'muted' }, 'PeerJS already uses its free shared TURN servers by default. Custom TURN settings are saved in this browser and added to the join link.')),
     h('section', {}, h('h2', {}, 'Lobby (waiting for approval)'), lobbyEl),
     h('section', {}, h('h2', {}, 'Players of this campaign'), playersEl),
     h('section', {}, h('h2', {}, 'Chat (stored in this browser)'), chat.el),
@@ -359,7 +451,7 @@ function viewDM(cid) {
 }
 
 // ---------- PLAYER ----------
-function viewPlayer(sid, secret) {
+function viewPlayer(sid, secret, opts = {}) {
   let token = localStorage.getItem(LS_TOKEN);
   const newToken = !token;
   if (!token) { token = rid(24); localStorage.setItem(LS_TOKEN, token); }
@@ -384,7 +476,7 @@ function viewPlayer(sid, secret) {
     setState('connecting', 'Connecting to the DM… (can take 5–20 s)');
     try {
       const c = await connectPeer(sid, {
-        log,
+        log, turn: opts.turn, relayOnly: opts.relayOnly,
         onJoin: pid => log('peer connected ' + short(pid)),
         onLeave: pid => {
           if (pid === dmPid && !left) { log('the DM peer disconnected'); dmPid = null; if (state === 'accepted' || state === 'pending') setState('connecting', 'DM disconnected. Waiting for the DM to come back…'); }
