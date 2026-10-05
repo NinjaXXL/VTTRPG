@@ -3,8 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VTTRPG Skeleton</title>
+  <meta name="description" content="VTTRPG browser-based DM and player session using PeerJS and WebRTC">
+  <title>VTTRPG Skeleton v0.7.0</title>
   <style>
+    :root { color-scheme: light dark; }
     body { font-family: system-ui, sans-serif; max-width: 880px; margin: 1rem auto; padding: 0 1rem; line-height: 1.4; }
     h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1rem 0 .3rem; }
     section { border: 1px solid #8884; border-radius: 6px; padding: .6rem .8rem; margin: .8rem 0; }
@@ -18,14 +20,17 @@
     .status { font-weight: 600; } .muted { opacity: .65; font-size: .9em; }
     footer { margin: 2rem 0 1rem; text-align: center; border-top: 1px solid #8884; padding-top: .5rem; }
     .tag { font-size: .75em; border: 1px solid #8888; border-radius: 3px; padding: 0 .3em; margin-left: .3em; }
+    .notice { border-left: 3px solid currentColor; padding-left: .6rem; }
   </style>
 </head>
 <body>
-  <h1>VTTRPG &ndash; Skeleton (concept test)</h1>
+  <h1>VTTRPG &ndash; Skeleton v0.7.0</h1>
   <div id="app">Loading&hellip; (if this stays, check the browser console)</div>
-  <footer id="version" class="muted">VTTRPG skeleton (version loads with the script)</footer>
+  <footer id="version" class="muted">VTTRPG skeleton v0.7.0 &middot; PeerJS 1.5.5</footer>
+
+  <!-- PeerJS is used for signaling; the actual game traffic is WebRTC data channels. -->
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js"></script>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=0.7.0"></script>
 </body>
 </html>
