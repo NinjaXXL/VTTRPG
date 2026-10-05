@@ -1,131 +1,52 @@
-// VTTRPG Skeleton
-// Version 0.7.1
+// VTTRPG Skeleton v0.8.0
 //
-// Architecture:
+// Intentionally follows the simple PeerJS architecture used by
+// volnuttz/5.5e-companion:
+//
 //   DM:
-//     stable PeerJS ID = "vttrpg-<roomId>"
-//   Player:
-//     temporary random PeerJS ID
-//   Signaling:
-//     PeerJS cloud
-//   Game/chat data:
-//     direct WebRTC data channel via PeerJS
+//     stable PeerJS id = "vttrpg-" + roomId
 //
-// v0.7.1 fixes:
-//   - DM PeerJS ID is explicitly passed to new Peer(...)
-//   - PIN completely removed
-//   - QR code restored
-//   - Chat restored
-//   - Player reconnects reuse the player PeerJS instance
-//   - Explicit STUN configuration
-//   - Optional user supplied TURN
-//   - Better WebRTC diagnostics
-//   - Stable player token per browser tab
-//   - Approval/open/locked session modes
+//   Player:
+//     random PeerJS id
+//
+//   Signaling:
+//     PeerJS public cloud
+//
+//   Data:
+//     PeerJS/WebRTC data channels
+//
+// IMPORTANT:
+// PEER_SERVER_CONFIG is deliberately empty.
+// PeerJS 1.5.5 then uses its own default ICE configuration.
+// Do not replace this with a custom STUN-only config unless you
+// explicitly want to disable the PeerJS defaults.
 
-const APP_VERSION = '0.7.1';
+const APP_VERSION = '0.8.0';
 const PEERJS_VERSION = '1.5.5';
 
 const PEER_PREFIX = 'vttrpg-';
 
-const LS_CAMPAIGNS = 'vttrpg:campaigns:v071';
+const PEER_SERVER_CONFIG = {};
+
+const STALE_CONNECTION_TIMEOUT = 60000;
+const STALE_CHECK_INTERVAL = 15000;
+
+const RECONNECT_BASE_DELAY = 1000;
+const RECONNECT_MAX_DELAY = 30000;
+const CONNECT_TIMEOUT_MS = 10000;
+
+const LS_CAMPAIGNS = 'vttrpg:campaigns';
 const LS_NAME = 'vttrpg:playerName';
-const LS_TURN = 'vttrpg:turn:v071';
-const SS_TOKEN = 'vttrpg:playerToken:v071';
+const SS_TOKEN = 'vttrpg:playerToken';
 
-const CONNECT_TIMEOUT_MS = 15000;
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 30000;
+const $app = document.getElementById('app');
 
-const HEARTBEAT_MS = 30000;
-const STALE_CHECK_MS = 15000;
-const STALE_MS = 60000;
-
-const JOIN_REPLY_TIMEOUT_MS = 10000;
-
-const MAX_CHAT = 1000;
-
-const STUN_SERVERS = [
-  {
-    urls: 'stun:stun.l.google.com:19302',
-  },
-  {
-    urls: 'stun:stun.cloudflare.com:3478',
-  },
-];
-
+let cleanup = null;
 let activeLog = null;
 
-// ---------------------------------------------------------------------------
-// Global diagnostics
-// ---------------------------------------------------------------------------
-
-const safeStr = value => {
-  try {
-    if (typeof value === 'string') {
-      return value;
-    }
-
-    return (
-      value?.message ||
-      JSON.stringify(value)
-    );
-  } catch {
-    return String(value);
-  }
-};
-
-for (const level of ['warn', 'error']) {
-  const original = console[level].bind(console);
-
-  console[level] = (...args) => {
-    original(...args);
-
-    try {
-      activeLog?.(
-        `console.${level}: ` +
-        args.map(safeStr).join(' ').slice(0, 500)
-      );
-    } catch {
-      // Ignore logger failures.
-    }
-  };
-}
-
-window.addEventListener('error', event => {
-  activeLog?.(
-    `window error: ${event.message}`
-  );
-});
-
-window.addEventListener('unhandledrejection', event => {
-  activeLog?.(
-    `unhandled rejection: ${safeStr(event.reason)}`
-  );
-});
-
-window.addEventListener('online', () => {
-  activeLog?.('browser went ONLINE');
-});
-
-window.addEventListener('offline', () => {
-  activeLog?.('browser went OFFLINE');
-});
-
-document.addEventListener(
-  'visibilitychange',
-  () => {
-    activeLog?.(
-      `tab is now ${
-        document.visibilityState
-      }`
-    );
-  }
-);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Small helpers
+// -----------------------------------------------------------------------------
 
 const short = id =>
   String(id || '').slice(0, 10);
@@ -147,30 +68,28 @@ const rid = (length = 12) => {
 const h = (
   tag,
   props = {},
-  ...kids
+  ...children
 ) => {
-  const element =
+  const el =
     document.createElement(tag);
 
   for (const [key, value] of Object.entries(props)) {
     if (key.startsWith('on')) {
-      element.addEventListener(
+      el.addEventListener(
         key.slice(2),
         value
       );
     } else if (key === 'class') {
-      element.className = value;
-    } else if (key === 'checked') {
-      element.checked = !!value;
+      el.className = value;
     } else {
-      element.setAttribute(
+      el.setAttribute(
         key,
         value
       );
     }
   }
 
-  for (const child of kids.flat()) {
+  for (const child of children.flat()) {
     if (
       child === null ||
       child === undefined ||
@@ -179,192 +98,22 @@ const h = (
       continue;
     }
 
-    element.append(
+    el.append(
       child instanceof Node
         ? child
         : String(child)
     );
   }
 
-  return element;
+  return el;
 };
 
-// ---------------------------------------------------------------------------
-// URL-safe base64 helpers for optional TURN settings in join links
-// ---------------------------------------------------------------------------
-
-const b64e = object => {
-  const bytes =
-    new TextEncoder().encode(
-      JSON.stringify(object)
-    );
-
-  let binary = '';
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-};
-
-const b64d = text => {
-  const normalized =
-    text
-      .replace(/-/g, '+')
-      .replace(/_/g, '/');
-
-  const binary =
-    atob(
-      normalized +
-      '='.repeat(
-        (4 - (normalized.length % 4)) % 4
-      )
-    );
-
-  const bytes =
-    Uint8Array.from(
-      binary,
-      char => char.charCodeAt(0)
-    );
-
-  return JSON.parse(
-    new TextDecoder().decode(bytes)
-  );
-};
-
-function parseOpts(queryString) {
-  const params =
-    new URLSearchParams(
-      queryString
-    );
-
-  let turn = null;
-
-  try {
-    const encoded =
-      params.get('t');
-
-    if (encoded) {
-      const parsed =
-        b64d(encoded);
-
-      const urls =
-        []
-          .concat(parsed?.urls || [])
-          .map(String)
-          .filter(url =>
-            /^(turns?|stuns?):/i.test(url)
-          );
-
-      if (urls.length) {
-        turn = {
-          urls,
-          username:
-            String(
-              parsed.username || ''
-            ),
-          credential:
-            String(
-              parsed.credential || ''
-            ),
-        };
-      }
-    }
-  } catch (error) {
-    console.warn(
-      'Could not parse TURN options:',
-      error
-    );
-  }
-
-  return {
-    turn,
-    relayOnly:
-      params.get('r') === '1',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// ICE / PeerJS configuration
-// ---------------------------------------------------------------------------
-
-function getIceConfig({
-  turn = null,
-  relayOnly = false,
-  log = () => {},
-} = {}) {
-  const iceServers = [
-    ...STUN_SERVERS,
-  ];
-
-  if (
-    turn &&
-    Array.isArray(turn.urls) &&
-    turn.urls.length
-  ) {
-    iceServers.push({
-      urls: turn.urls,
-      username:
-        turn.username || '',
-      credential:
-        turn.credential || '',
-    });
-  }
-
-  const config = {
-    iceServers,
-
-    // Helps gathering start consistently.
-    iceCandidatePoolSize: 4,
-
-    // PeerJS works with unified-plan in modern browsers.
-    sdpSemantics: 'unified-plan',
-  };
-
-  if (relayOnly) {
-    config.iceTransportPolicy = 'relay';
-  }
-
-  log(
-    `ICE config: ` +
-    `STUN Google + Cloudflare` +
-    (
-      turn
-        ? ` + TURN ${turn.urls.join(', ')}`
-        : ' + no TURN'
-    ) +
-    (
-      relayOnly
-        ? ' | RELAY-ONLY'
-        : ''
-    )
-  );
-
-  if (
-    relayOnly &&
-    !turn
-  ) {
-    log(
-      'WARNING: relay-only mode was requested ' +
-      'without a TURN server.'
-    );
-  }
-
-  return {
-    config,
-  };
-}
-
-function getTurnFromLocalStorage() {
+function loadCampaigns() {
   try {
     return (
       JSON.parse(
         localStorage.getItem(
-          LS_TURN
+          LS_CAMPAIGNS
         )
       ) || {}
     );
@@ -373,241 +122,152 @@ function getTurnFromLocalStorage() {
   }
 }
 
-function saveTurnToLocalStorage(turn) {
-  try {
-    localStorage.setItem(
-      LS_TURN,
-      JSON.stringify(turn)
-    );
-  } catch (error) {
-    console.error(
-      'Could not save TURN settings:',
-      error
-    );
-  }
-}
+function saveCampaign(campaign) {
+  const all =
+    loadCampaigns();
 
-// ---------------------------------------------------------------------------
-// WebRTC diagnostics
-// ---------------------------------------------------------------------------
+  all[campaign.id] =
+    campaign;
 
-function getUnderlyingPc(connection) {
-  return (
-    connection?.peerConnection ||
-    connection?._pc ||
-    null
+  localStorage.setItem(
+    LS_CAMPAIGNS,
+    JSON.stringify(all)
   );
 }
 
-function candidateTypeFromLine(line) {
-  return (
-    /\btyp\s+(\w+)/i.exec(
-      String(line || '')
-    )?.[1] ||
-    null
+function deleteCampaign(id) {
+  const all =
+    loadCampaigns();
+
+  delete all[id];
+
+  localStorage.setItem(
+    LS_CAMPAIGNS,
+    JSON.stringify(all)
   );
 }
 
-async function logConnectionStats(
-  connection,
-  label = 'RTC'
+// -----------------------------------------------------------------------------
+// Logging
+// -----------------------------------------------------------------------------
+
+function makeLog(
+  role,
+  onStatus
 ) {
-  const pc =
-    getUnderlyingPc(connection);
-
-  if (!pc) {
-    activeLog?.(
-      `${label}: no underlying RTCPeerConnection`
+  const pre =
+    h(
+      'pre',
+      {
+        class:
+          'log',
+      }
     );
-    return;
-  }
 
-  const summary = {
-    ice:
-      pc.iceConnectionState,
-    connection:
-      pc.connectionState,
-    gathering:
-      pc.iceGatheringState,
-    signaling:
-      pc.signalingState,
-    pairs: [],
-  };
+  const log =
+    text => {
+      const line =
+        `${new Date().toISOString().slice(11, 23)}  ${text}\n`;
 
-  try {
-    const stats =
-      await pc.getStats();
+      pre.textContent += line;
+      pre.scrollTop =
+        pre.scrollHeight;
 
-    stats.forEach(report => {
-      if (
-        report.type !==
-        'candidate-pair'
-      ) {
-        return;
-      }
+      console.log(
+        `[VTTRPG ${role}]`,
+        text
+      );
+    };
 
-      const local =
-        stats.get(
-          report.localCandidateId
-        );
+  activeLog = log;
 
-      const remote =
-        stats.get(
-          report.remoteCandidateId
-        );
+  const toolbar =
+    h(
+      'div',
+      {
+        class:
+          'row',
+      },
 
-      summary.pairs.push({
-        state:
-          report.state,
-        nominated:
-          !!report.nominated,
-        selected:
-          !!report.selected,
-        local:
-          local?.candidateType ||
-          '?',
-        localProtocol:
-          local?.protocol ||
-          '?',
-        remote:
-          remote?.candidateType ||
-          '?',
-        remoteProtocol:
-          remote?.protocol ||
-          '?',
-        requestsSent:
-          report.requestsSent ||
-          0,
-        responsesReceived:
-          report.responsesReceived ||
-          0,
-      });
-    });
-  } catch (error) {
-    summary.statsError =
-      error.message;
-  }
+      onStatus
+        ? h(
+            'button',
+            {
+              onclick:
+                onStatus,
+            },
+            'Log status now'
+          )
+        : null,
 
-  activeLog?.(
-    `${label}: ICE diagnostics: ` +
-    JSON.stringify(summary)
-  );
-}
+      h(
+        'button',
+        {
+          onclick:
+            async () => {
+              try {
+                await navigator.clipboard.writeText(
+                  pre.textContent
+                );
 
-function attachRtcDiagnostics(
-  connection,
-  label
-) {
-  const pc =
-    getUnderlyingPc(connection);
+                log(
+                  'log copied'
+                );
+              } catch (
+                error
+              ) {
+                log(
+                  `copy failed: ${error.message}`
+                );
+              }
+            },
+        },
+        'Copy log'
+      ),
 
-  if (!pc) {
-    activeLog?.(
-      `${label}: RTCPeerConnection not ` +
-      `available yet`
+      h(
+        'button',
+        {
+          onclick:
+            () => {
+              pre.textContent =
+                '';
+            },
+        },
+        'Clear'
+      )
     );
-    return;
-  }
 
-  pc.addEventListener(
-    'icecandidateerror',
-    event => {
-      activeLog?.(
-        `${label}: ICE candidate error ` +
-        `${event.errorCode || ''} ` +
-        `${event.url || ''} ` +
-        `${event.errorText || ''}`
-      );
-    }
+  log(
+    `VTTRPG v${APP_VERSION} ${role} view started; page ${location.pathname}`
   );
 
-  pc.addEventListener(
-    'iceconnectionstatechange',
-    () => {
-      activeLog?.(
-        `${label}: ice=${pc.iceConnectionState}`
-      );
-
-      if (
-        pc.iceConnectionState ===
-        'failed'
-      ) {
-        logConnectionStats(
-          connection,
-          `${label} FAILURE`
-        );
-      }
-    }
+  log(
+    `env: online=${navigator.onLine} secureContext=${isSecureContext} RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'} PeerJS=${window.Peer ? 'loaded' : 'MISSING'}`
   );
 
-  pc.addEventListener(
-    'connectionstatechange',
-    () => {
-      activeLog?.(
-        `${label}: conn=${pc.connectionState}`
-      );
-
-      if (
-        pc.connectionState ===
-        'connected'
-      ) {
-        setTimeout(
-          () =>
-            logConnectionStats(
-              connection,
-              `${label} CONNECTED`
-            ),
-          500
-        );
-      }
-
-      if (
-        pc.connectionState ===
-        'failed'
-      ) {
-        logConnectionStats(
-          connection,
-          `${label} FAILURE`
-        );
-      }
-    }
+  log(
+    `browser: ${navigator.userAgent}`
   );
 
-  pc.addEventListener(
-    'icegatheringstatechange',
-    () => {
-      activeLog?.(
-        `${label}: gathering=${pc.iceGatheringState}`
-      );
-    }
-  );
-
-  pc.addEventListener(
-    'signalingstatechange',
-    () => {
-      activeLog?.(
-        `${label}: signaling=${pc.signalingState}`
-      );
-    }
-  );
-}
-
-// ---------------------------------------------------------------------------
-// PeerJS DM transport
-// ---------------------------------------------------------------------------
-
-function createDMPeer(
-  roomId,
-  {
+  return {
+    el:
+      h(
+        'div',
+        {},
+        toolbar,
+        pre
+      ),
     log,
-    turn = null,
-    relayOnly = false,
-    onPlayerConnect,
-    onPlayerDisconnect,
-    onMessage,
-    onSignaling,
-  }
-) {
+  };
+}
+
+// -----------------------------------------------------------------------------
+// PeerJS layer
+// Based directly on the simple 5.5e-companion architecture.
+// -----------------------------------------------------------------------------
+
+function createDMPeer(roomId) {
   const peerId =
     PEER_PREFIX + roomId;
 
@@ -615,20 +275,15 @@ function createDMPeer(
     new Map();
 
   let peer = null;
+
   let destroyed = false;
-  let opened = false;
-
   let staleTimer = null;
-  let signalingReconnectTimer = null;
 
-  let signalingAttempt = 0;
-
-  const opts =
-    getIceConfig({
-      turn,
-      relayOnly,
-      log,
-    });
+  let onPlayerConnect = null;
+  let onPlayerDisconnect = null;
+  let onPlayerMessage = null;
+  let onSignalingDisconnect = null;
+  let onSignalingReconnect = null;
 
   function init() {
     return new Promise(
@@ -650,438 +305,247 @@ function createDMPeer(
     if (destroyed) {
       reject(
         new Error(
-          'DM peer was destroyed'
+          'DM peer destroyed'
         )
       );
+
       return;
     }
 
-    opened = false;
-
-    log(
-      `registering ${peerId} at the ` +
-      `PeerJS cloud (attempt ${attempt + 1})…`
+    console.log(
+      '[Peer] registering DM:',
+      peerId
     );
 
-    // CRITICAL:
-    // The DM MUST pass the stable room peer ID
-    // as the first argument.
+    // THIS IS THE IMPORTANT PART.
+    // The DM gets the stable room ID.
     peer =
       new window.Peer(
         peerId,
-        {
-          debug: 0,
-          ...opts,
-        }
+        PEER_SERVER_CONFIG
       );
 
     peer.on(
       'open',
       id => {
-        if (!opened) {
-          opened = true;
+        console.log(
+          '[Peer] DM peer open:',
+          id
+        );
 
-          log(
-            `PeerJS signaling connected ` +
-            `as ${id}`
+        attachPeerEvents();
+
+        resolve(id);
+      }
+    );
+
+    peer.on(
+      'error',
+      error => {
+        console.error(
+          '[Peer] DM error:',
+          error
+        );
+
+        if (
+          error.type ===
+            'unavailable-id' &&
+          attempt < 3
+        ) {
+          const delay =
+            2000 *
+            (attempt + 1);
+
+          console.log(
+            `[Peer] Peer ID in use, retrying in ${delay}ms`
           );
 
-          resolve(id);
+          try {
+            peer.destroy();
+          } catch {}
+
+          setTimeout(
+            () => {
+              if (!destroyed) {
+                tryInit(
+                  resolve,
+                  reject,
+                  attempt + 1
+                );
+              }
+            },
+            delay
+          );
 
           return;
         }
 
-        signalingAttempt = 0;
-
-        if (
-          signalingReconnectTimer
-        ) {
-          clearTimeout(
-            signalingReconnectTimer
-          );
-
-          signalingReconnectTimer =
-            null;
-        }
-
-        log(
-          `DM signaling re-established ` +
-          `as ${id}`
-        );
-
-        onSignaling?.(
-          'connected'
+        reject(
+          new Error(
+            error.type ===
+              'unavailable-id'
+              ? 'Session ID is still held by another connection. Wait a moment and try again.'
+              : `Connection error: ${error.type || error.message || error}`
+          )
         );
       }
     );
 
     peer.on(
       'connection',
-      connection => {
-        handleIncoming(
-          connection
-        );
-      }
+      handleIncomingConnection
     );
+  }
 
+  function attachPeerEvents() {
     peer.on(
       'disconnected',
       () => {
-        if (
-          destroyed ||
-          !opened
-        ) {
-          return;
-        }
-
-        scheduleSignalingReconnect();
-      }
-    );
-
-    peer.on(
-      'error',
-      error => {
         if (destroyed) {
           return;
         }
 
-        log(
-          `PeerJS error ` +
-          `(${error?.type || 'unknown'}): ` +
-          `${safeStr(error)}`
+        console.log(
+          '[Peer] DM lost signaling connection'
         );
 
-        if (!opened) {
-          if (
-            error?.type ===
-              'unavailable-id' &&
-            attempt < 5
-          ) {
-            const delay =
-              Math.min(
-                10000,
-                1500 *
-                Math.pow(
-                  2,
-                  attempt
-                )
-              );
+        onSignalingDisconnect?.();
 
-            log(
-              `DM peer ID is still held by ` +
-              `the signaling server; retrying ` +
-              `in ${delay} ms…`
-            );
+        setTimeout(
+          () => {
+            if (
+              !destroyed &&
+              peer &&
+              !peer.destroyed
+            ) {
+              try {
+                peer.reconnect();
+              } catch (
+                error
+              ) {
+                console.error(
+                  '[Peer] reconnect failed:',
+                  error
+                );
+              }
+            }
+          },
+          1000
+        );
+      }
+    );
 
-            try {
-              peer.destroy();
-            } catch {}
-
-            setTimeout(
-              () => {
-                if (!destroyed) {
-                  tryInit(
-                    resolve,
-                    reject,
-                    attempt + 1
-                  );
-                }
-              },
-              delay
-            );
-
-            return;
-          }
-
-          reject(
-            new Error(
-              error?.type ===
-                'unavailable-id'
-                ? 'The stable DM room ID is still in use. ' +
-                  'Wait a moment and reopen the session.'
-                : (
-                  'PeerJS connection error: ' +
-                  (
-                    error?.type ||
-                    safeStr(error)
-                  )
-                )
-            )
-          );
-
-          return;
-        }
-
-        if (
-          peer.disconnected
-        ) {
-          scheduleSignalingReconnect();
-        }
+    peer.on(
+      'open',
+      () => {
+        onSignalingReconnect?.();
       }
     );
   }
 
-  function scheduleSignalingReconnect() {
-    if (
-      destroyed ||
-      signalingReconnectTimer
-    ) {
-      return;
-    }
-
-    signalingAttempt++;
-
-    const delay =
-      Math.min(
-        RECONNECT_MAX_MS,
-        RECONNECT_BASE_MS *
-        Math.pow(
-          2,
-          signalingAttempt - 1
-        )
-      );
-
-    log(
-      `DM signaling lost; ` +
-      `reconnecting in ${delay} ms ` +
-      `(attempt ${signalingAttempt})`
-    );
-
-    onSignaling?.(
-      'reconnecting'
-    );
-
-    signalingReconnectTimer =
-      setTimeout(
-        () => {
-          signalingReconnectTimer =
-            null;
-
-          if (
-            destroyed ||
-            !peer ||
-            peer.destroyed
-          ) {
-            return;
-          }
-
-          if (
-            peer.disconnected
-          ) {
-            try {
-              log(
-                'calling peer.reconnect()'
-              );
-
-              peer.reconnect();
-            } catch (error) {
-              log(
-                `peer.reconnect failed: ` +
-                `${error.message}`
-              );
-
-              // Last resort:
-              // create another Peer with the
-              // SAME stable ID.
-              tryRecreate();
-            }
-          }
-        },
-        delay
-      );
-  }
-
-  function tryRecreate() {
-    if (destroyed) {
-      return;
-    }
-
-    try {
-      peer?.destroy();
-    } catch {}
-
-    opened = false;
-
-    tryInit(
-      () => {
-        signalingAttempt = 0;
-        log(
-          `DM stable PeerJS ID reclaimed: ${peerId}`
-        );
-      },
-      error => {
-        log(
-          `DM PeerJS recreation failed: ` +
-          `${error.message}`
-        );
-
-        scheduleSignalingReconnect();
-      },
-      0
-    );
-  }
-
-  function handleIncoming(
-    connection
+  function handleIncomingConnection(
+    conn
   ) {
-    const pid =
-      connection.peer;
-
-    log(
-      `incoming connection from ` +
-      `${short(pid)} (negotiating…)`
+    console.log(
+      '[Peer] incoming:',
+      conn.peer
     );
 
-    attachRtcDiagnostics(
-      connection,
-      `rtc ${short(pid)}`
-    );
-
-    let openedConnection =
-      false;
-
-    connection.on(
+    conn.on(
       'open',
       () => {
-        openedConnection = true;
-
-        const existing =
-          connections.get(pid);
-
-        if (
-          existing &&
-          existing !== connection
-        ) {
-          try {
-            existing.close();
-          } catch {}
-        }
-
         connections.set(
-          pid,
+          conn.peer,
           {
-            conn: connection,
+            conn,
             lastActivity:
               Date.now(),
           }
         );
 
-        log(
-          `data channel open: ` +
-          `${short(pid)}`
-        );
+        if (onPlayerConnect) {
+          onPlayerConnect(
+            conn.peer
+          );
+        }
 
         ensureStaleCheck();
-
-        onPlayerConnect?.(
-          pid
-        );
       }
     );
 
-    connection.on(
+    conn.on(
       'data',
       data => {
         const entry =
-          connections.get(pid);
+          connections.get(
+            conn.peer
+          );
 
-        if (
-          entry &&
-          entry.conn === connection
-        ) {
+        if (entry) {
           entry.lastActivity =
             Date.now();
         }
 
         if (
           data &&
-          data.t === 'ping'
+          data.type === 'ping'
         ) {
           try {
-            connection.send({
-              t: 'pong',
-              ts: data.ts,
+            conn.send({
+              type:
+                'pong',
+
+              ts:
+                data.ts,
             });
           } catch {}
-
-          return;
         }
 
-        onMessage?.(
-          data,
-          pid
-        );
+        if (onPlayerMessage) {
+          onPlayerMessage(
+            conn.peer,
+            data
+          );
+        }
       }
     );
 
-    const drop = reason => {
-      const entry =
-        connections.get(pid);
-
-      if (
-        !entry ||
-        entry.conn !== connection
-      ) {
-        return;
-      }
-
-      connections.delete(pid);
-
-      log(
-        `player ${short(pid)} gone ` +
-        `(${reason})`
-      );
-
-      onPlayerDisconnect?.(
-        pid
-      );
-    };
-
-    connection.on(
+    conn.on(
       'close',
       () => {
-        drop('closed');
-
-        if (
-          !openedConnection
-        ) {
-          log(
-            `rtc ${short(pid)} closed ` +
-            `before data channel opened`
+        const entry =
+          connections.get(
+            conn.peer
           );
-        }
-      }
-    );
 
-    connection.on(
-      'error',
-      error => {
-        log(
-          `connection error ` +
-          `${short(pid)}: ` +
-          `${error?.type || ''} ` +
-          `${safeStr(error)}`
+        connections.delete(
+          conn.peer
         );
 
-        drop('error');
+        onPlayerDisconnect?.(
+          conn.peer,
+          entry
+        );
       }
     );
 
-    // Helpful diagnostic when a remote peer
-    // never opens the connection.
-    setTimeout(
+    conn.on(
+      'error',
       () => {
-        if (
-          !openedConnection &&
-          !destroyed
-        ) {
-          logConnectionStats(
-            connection,
-            `rtc ${short(pid)} timeout`
+        const entry =
+          connections.get(
+            conn.peer
           );
-        }
-      },
-      CONNECT_TIMEOUT_MS
+
+        connections.delete(
+          conn.peer
+        );
+
+        onPlayerDisconnect?.(
+          conn.peer,
+          entry
+        );
+      }
     );
   }
 
@@ -1098,37 +562,31 @@ function createDMPeer(
               staleTimer
             );
 
-            staleTimer = null;
+            staleTimer =
+              null;
 
             return;
           }
 
-          const now =
+          const time =
             Date.now();
 
           for (
-            const [pid, entry]
+            const [id, entry]
             of connections
           ) {
             if (
-              now -
-              entry.lastActivity >
-              STALE_MS
+              time -
+                entry.lastActivity >
+              STALE_CONNECTION_TIMEOUT
             ) {
-              log(
-                `stale connection ` +
-                `${short(pid)} ` +
-                `(silent for ` +
-                `${Math.round(
-                  (
-                    now -
-                    entry.lastActivity
-                  ) / 1000
-                )} s)`
+              console.log(
+                '[Peer] stale connection:',
+                id
               );
 
               connections.delete(
-                pid
+                id
               );
 
               try {
@@ -1136,262 +594,232 @@ function createDMPeer(
               } catch {}
 
               onPlayerDisconnect?.(
-                pid
+                id,
+                entry
               );
             }
           }
 
           if (
-            !connections.size
+            connections.size ===
+            0
           ) {
             clearInterval(
               staleTimer
             );
 
-            staleTimer = null;
+            staleTimer =
+              null;
           }
         },
-        STALE_CHECK_MS
+        STALE_CHECK_INTERVAL
       );
+  }
+
+  function sendToPlayer(
+    peerId,
+    message
+  ) {
+    const entry =
+      connections.get(
+        peerId
+      );
+
+    if (
+      !entry ||
+      !entry.conn
+    ) {
+      return;
+    }
+
+    try {
+      entry.conn.send(
+        message
+      );
+    } catch (
+      error
+    ) {
+      console.error(
+        '[Peer] send failed:',
+        error
+      );
+    }
+  }
+
+  function broadcast(
+    message
+  ) {
+    for (
+      const entry
+      of connections.values()
+    ) {
+      try {
+        entry.conn.send(
+          message
+        );
+      } catch {}
+    }
+  }
+
+  function isConnected() {
+    return !!(
+      peer &&
+      !peer.disconnected &&
+      !peer.destroyed
+    );
+  }
+
+  function status() {
+    console.log(
+      '[Peer] DM status',
+      {
+        peerId,
+        signaling:
+          isConnected(),
+        players:
+          connections.size,
+      }
+    );
+  }
+
+  function destroy() {
+    destroyed =
+      true;
+
+    if (staleTimer) {
+      clearInterval(
+        staleTimer
+      );
+
+      staleTimer =
+        null;
+    }
+
+    if (peer) {
+      try {
+        peer.destroy();
+      } catch {}
+
+      peer =
+        null;
+    }
+
+    connections.clear();
   }
 
   return {
     init,
+    sendToPlayer,
+    broadcast,
+    isConnected,
+    status,
+    destroy,
 
-    send(
-      data,
-      target = null
-    ) {
-      const list =
-        target
-          ? [
-              [
-                target,
-                connections.get(target),
-              ],
-            ]
-          : [
-              ...connections.entries(),
-            ];
-
-      for (
-        const [pid, entry]
-        of list
-      ) {
-        const conn =
-          entry?.conn;
-
-        if (
-          !conn ||
-          !conn.open
-        ) {
-          continue;
-        }
-
-        try {
-          conn.send(data);
-
-          log(
-            `→ ${short(pid)} ` +
-            `${data?.t || 'message'}`
-          );
-        } catch (error) {
-          log(
-            `send failed to ` +
-            `${short(pid)}: ` +
-            `${error.message}`
-          );
-        }
-      }
+    onPlayerConnect(cb) {
+      onPlayerConnect =
+        cb;
     },
 
-    close(pid) {
-      const entry =
-        connections.get(pid);
-
-      if (!entry) {
-        return;
-      }
-
-      connections.delete(pid);
-
-      try {
-        entry.conn.close();
-      } catch {}
+    onPlayerDisconnect(cb) {
+      onPlayerDisconnect =
+        cb;
     },
 
-    isConnected() {
-      return (
-        !!peer &&
-        !peer.disconnected &&
-        !peer.destroyed
-      );
+    onPlayerMessage(cb) {
+      onPlayerMessage =
+        cb;
     },
 
-    status() {
-      log(
-        `DM peer ${peerId}: ` +
-        `signaling=${
-          peer?.disconnected
-            ? 'DISCONNECTED'
-            : peer?.destroyed
-              ? 'destroyed'
-              : 'connected'
-        } | ` +
-        `players=${connections.size}`
-      );
+    onSignalingDisconnect(cb) {
+      onSignalingDisconnect =
+        cb;
     },
 
-    destroy() {
-      destroyed = true;
-
-      if (staleTimer) {
-        clearInterval(
-          staleTimer
-        );
-      }
-
-      if (
-        signalingReconnectTimer
-      ) {
-        clearTimeout(
-          signalingReconnectTimer
-        );
-      }
-
-      staleTimer = null;
-      signalingReconnectTimer = null;
-
-      for (
-        const entry
-        of connections.values()
-      ) {
-        try {
-          entry.conn.close();
-        } catch {}
-      }
-
-      connections.clear();
-
-      try {
-        peer?.destroy();
-      } catch {}
-
-      peer = null;
-
-      log(
-        `DM peer destroyed ` +
-        `(stable id was ${peerId})`
-      );
+    onSignalingReconnect(cb) {
+      onSignalingReconnect =
+        cb;
     },
   };
 }
 
-// ---------------------------------------------------------------------------
-// PeerJS player transport
-// ---------------------------------------------------------------------------
-
 function createPlayerPeer(
-  roomId,
-  {
-    log,
-    turn = null,
-    relayOnly = false,
-    onConnect,
-    onDisconnect,
-    onReconnecting,
-    onMessage,
-  }
+  roomId
 ) {
-  const hostId =
+  const hostPeerId =
     PEER_PREFIX + roomId;
-
-  const opts =
-    getIceConfig({
-      turn,
-      relayOnly,
-      log,
-    });
 
   let peer = null;
   let conn = null;
 
   let destroyed = false;
 
-  let connectAttempt = 0;
   let reconnectAttempt = 0;
-
-  let connectTimer = null;
   let reconnectTimer = null;
-  let heartbeat = null;
 
-  let explicitDisconnect = false;
+  let heartbeatTimer = null;
 
-  function start() {
-    destroyed = false;
-    explicitDisconnect = false;
+  let onMessage = null;
+  let onDisconnect = null;
+  let onConnect = null;
+  let onReconnecting = null;
 
-    createPeer();
+  function connect() {
+    return new Promise(
+      (resolve, reject) => {
+        destroyed =
+          false;
+
+        createPeer(
+          resolve,
+          reject
+        );
+      }
+    );
   }
 
-  function createPeer() {
-    if (destroyed) {
-      return;
-    }
-
+  function createPeer(
+    resolve,
+    reject
+  ) {
     if (
       peer &&
       !peer.destroyed
     ) {
+      openConnection(
+        resolve,
+        reject
+      );
+
       return;
     }
 
-    log(
-      'creating temporary player PeerJS peer…'
-    );
-
-    // Player gets an automatically generated
-    // PeerJS ID.
+    // EXACTLY the simple player approach:
+    // let PeerJS generate the player ID.
     peer =
       new window.Peer(
         undefined,
-        {
-          debug: 0,
-          ...opts,
-        }
+        PEER_SERVER_CONFIG
       );
 
     peer.on(
       'open',
-      id => {
-        log(
-          `Player PeerJS signaling connected ` +
-          `as ${id}`
+      () => {
+        openConnection(
+          resolve,
+          reject
         );
-
-        reconnectAttempt = 0;
-
-        if (
-          !conn ||
-          !conn.open
-        ) {
-          connectToDm();
-        }
       }
     );
 
     peer.on(
       'disconnected',
       () => {
-        if (
-          destroyed ||
-          explicitDisconnect
-        ) {
+        if (destroyed) {
           return;
         }
 
-        log(
-          'Player PeerJS signaling disconnected'
+        console.log(
+          '[Peer] Player lost signaling connection'
         );
 
         setTimeout(
@@ -1399,17 +827,11 @@ function createPlayerPeer(
             if (
               !destroyed &&
               peer &&
-              !peer.destroyed &&
-              peer.disconnected
+              !peer.destroyed
             ) {
               try {
                 peer.reconnect();
-              } catch (error) {
-                log(
-                  `player signaling reconnect ` +
-                  `failed: ${error.message}`
-                );
-              }
+              } catch {}
             }
           },
           1000
@@ -1420,71 +842,30 @@ function createPlayerPeer(
     peer.on(
       'error',
       error => {
-        if (
-          destroyed ||
-          explicitDisconnect
-        ) {
-          return;
+        console.error(
+          '[Peer] Player peer error:',
+          error
+        );
+
+        if (reject) {
+          const fn =
+            reject;
+
+          reject =
+            null;
+
+          fn(error);
+        } else {
+          scheduleReconnect();
         }
-
-        log(
-          `Player PeerJS error ` +
-          `(${error?.type || 'unknown'}): ` +
-          `${safeStr(error)}`
-        );
-
-        if (
-          error?.type ===
-          'peer-unavailable'
-        ) {
-          scheduleReconnect(
-            'DM unavailable'
-          );
-        }
-      }
-    );
-
-    peer.on(
-      'connection',
-      incoming => {
-        log(
-          `refusing unexpected incoming ` +
-          `connection from ` +
-          `${short(incoming.peer)}`
-        );
-
-        try {
-          incoming.close();
-        } catch {}
-      }
-    );
-
-    // PeerJS may emit close after a fatal
-    // signaling issue.
-    peer.on(
-      'close',
-      () => {
-        if (
-          destroyed ||
-          explicitDisconnect
-        ) {
-          return;
-        }
-
-        log(
-          'Player PeerJS object closed'
-        );
-
-        peer = null;
-
-        scheduleReconnect(
-          'player peer closed'
-        );
       }
     );
   }
 
-  function connectToDm() {
+  function openConnection(
+    resolve,
+    reject
+  ) {
     if (
       destroyed ||
       !peer ||
@@ -1493,238 +874,156 @@ function createPlayerPeer(
       return;
     }
 
-    if (
-      conn &&
-      conn.open
-    ) {
-      return;
-    }
-
-    if (
-      peer.disconnected
-    ) {
-      log(
-        'Player signaling is disconnected; ' +
-        'waiting for signaling reconnect'
+    conn =
+      peer.connect(
+        hostPeerId,
+        {
+          reliable:
+            true,
+        }
       );
 
-      return;
-    }
+    let opened =
+      false;
 
-    connectAttempt++;
-
-    const attempt =
-      connectAttempt;
-
-    log(
-      `connecting to DM ${hostId} ` +
-      `(attempt ${attempt}, ` +
-      `${CONNECT_TIMEOUT_MS / 1000}s timeout)…`
-    );
-
-    let connection;
-
-    try {
-      connection =
-        peer.connect(
-          hostId,
-          {
-            reliable: true,
-            serialization: 'json',
-          }
-        );
-    } catch (error) {
-      log(
-        `peer.connect failed: ` +
-        `${error.message}`
-      );
-
-      scheduleReconnect(
-        'peer.connect failed'
-      );
-
-      return;
-    }
-
-    conn = connection;
-
-    attachRtcDiagnostics(
-      connection,
-      `player rtc`
-    );
-
-    let opened = false;
-    let finished = false;
-
-    if (connectTimer) {
-      clearTimeout(
-        connectTimer
-      );
-    }
-
-    connectTimer =
+    const timeout =
       setTimeout(
-        async () => {
-          if (
-            finished ||
-            destroyed ||
-            conn !== connection
-          ) {
+        () => {
+          if (opened) {
             return;
           }
 
-          finished = true;
-
-          log(
-            `player connection attempt ` +
-            `${attempt} timed out`
-          );
-
-          await logConnectionStats(
-            connection,
-            `player timeout`
+          console.warn(
+            '[Peer] connection to DM timed out'
           );
 
           try {
-            connection.close();
+            conn.close();
           } catch {}
 
-          scheduleReconnect(
-            'WebRTC timeout'
-          );
+          if (reject) {
+            const fn =
+              reject;
+
+            reject =
+              null;
+
+            fn(
+              new Error(
+                'Connection timed out'
+              )
+            );
+          } else {
+            scheduleReconnect();
+          }
         },
         CONNECT_TIMEOUT_MS
       );
 
-    connection.on(
+    conn.on(
       'open',
       () => {
-        if (
-          destroyed ||
-          conn !== connection
-        ) {
-          return;
-        }
+        opened =
+          true;
 
-        opened = true;
-        finished = true;
+        clearTimeout(
+          timeout
+        );
 
-        if (connectTimer) {
-          clearTimeout(
-            connectTimer
-          );
+        reconnectAttempt =
+          0;
 
-          connectTimer = null;
-        }
-
-        reconnectAttempt = 0;
-
-        log(
-          `data channel to DM OPEN ` +
-          `(attempt ${attempt})`
+        console.log(
+          '[Peer] connected to DM'
         );
 
         startHeartbeat();
+
+        if (resolve) {
+          const fn =
+            resolve;
+
+          resolve =
+            null;
+
+          fn();
+        }
 
         onConnect?.();
       }
     );
 
-    connection.on(
+    conn.on(
       'data',
       data => {
-        if (
-          data &&
-          data.t === 'pong'
-        ) {
-          return;
-        }
-
         onMessage?.(
           data
         );
       }
     );
 
-    connection.on(
+    conn.on(
       'close',
-      async () => {
-        if (conn !== connection) {
-          return;
-        }
-
-        if (connectTimer) {
-          clearTimeout(
-            connectTimer
-          );
-
-          connectTimer = null;
-        }
+      () => {
+        clearTimeout(
+          timeout
+        );
 
         stopHeartbeat();
 
-        if (
-          !opened &&
-          !destroyed
-        ) {
-          await logConnectionStats(
-            connection,
-            `player closed before open`
-          );
-        }
+        console.log(
+          '[Peer] disconnected from DM'
+        );
 
-        conn = null;
+        onDisconnect?.();
 
-        if (
-          !destroyed &&
-          !explicitDisconnect
-        ) {
-          onDisconnect?.();
-          scheduleReconnect(
-            'data channel closed'
-          );
-        }
+        scheduleReconnect();
       }
     );
 
-    connection.on(
+    conn.on(
       'error',
       error => {
-        log(
-          `player data connection error: ` +
-          `${error?.type || ''} ` +
-          `${safeStr(error)}`
+        clearTimeout(
+          timeout
         );
+
+        stopHeartbeat();
+
+        console.error(
+          '[Peer] connection error:',
+          error
+        );
+
+        onDisconnect?.();
+
+        scheduleReconnect();
       }
     );
   }
 
-  function scheduleReconnect(
-    reason = 'unknown'
-  ) {
+  function scheduleReconnect() {
     if (
       destroyed ||
-      explicitDisconnect ||
       reconnectTimer
     ) {
       return;
     }
 
-    reconnectAttempt++;
-
     const delay =
       Math.min(
-        RECONNECT_MAX_MS,
-        RECONNECT_BASE_MS *
-        Math.pow(
-          2,
-          reconnectAttempt - 1
-        )
+        RECONNECT_BASE_DELAY *
+          Math.pow(
+            2,
+            reconnectAttempt
+          ),
+        RECONNECT_MAX_DELAY
       );
 
-    log(
-      `player retry ${reconnectAttempt} ` +
-      `in ${delay} ms: ${reason}`
+    reconnectAttempt++;
+
+    console.log(
+      `[Peer] reconnecting in ${delay}ms`
     );
 
     onReconnecting?.(
@@ -1735,375 +1034,201 @@ function createPlayerPeer(
     reconnectTimer =
       setTimeout(
         () => {
-          reconnectTimer = null;
+          reconnectTimer =
+            null;
 
-          if (
-            destroyed ||
-            explicitDisconnect
-          ) {
-            return;
+          if (!destroyed) {
+            doReconnect();
           }
-
-          if (
-            !peer ||
-            peer.destroyed
-          ) {
-            createPeer();
-            return;
-          }
-
-          if (
-            peer.disconnected
-          ) {
-            try {
-              peer.reconnect();
-            } catch (error) {
-              log(
-                `peer.reconnect failed: ` +
-                `${error.message}`
-              );
-
-              peer = null;
-              createPeer();
-            }
-
-            return;
-          }
-
-          connectToDm();
         },
         delay
       );
   }
 
+  function doReconnect() {
+    if (destroyed) {
+      return;
+    }
+
+    console.log(
+      '[Peer] attempting reconnect'
+    );
+
+    if (
+      peer &&
+      !peer.destroyed
+    ) {
+      openConnection(
+        null,
+        null
+      );
+    } else {
+      createPeer(
+        null,
+        null
+      );
+    }
+  }
+
+  function reconnectNow() {
+    if (
+      destroyed ||
+      isConnected()
+    ) {
+      return;
+    }
+
+    cancelReconnect();
+
+    doReconnect();
+  }
+
+  function cancelReconnect() {
+    if (
+      reconnectTimer
+    ) {
+      clearTimeout(
+        reconnectTimer
+      );
+
+      reconnectTimer =
+        null;
+    }
+
+    reconnectAttempt =
+      0;
+  }
+
   function startHeartbeat() {
     stopHeartbeat();
 
-    heartbeat =
+    heartbeatTimer =
       setInterval(
         () => {
           if (
-            conn?.open
+            isConnected()
           ) {
             try {
               conn.send({
-                t: 'ping',
-                ts: Date.now(),
+                type:
+                  'ping',
+
+                ts:
+                  Date.now(),
               });
             } catch {}
           }
         },
-        HEARTBEAT_MS
+        30000
       );
   }
 
   function stopHeartbeat() {
-    if (heartbeat) {
+    if (
+      heartbeatTimer
+    ) {
       clearInterval(
-        heartbeat
+        heartbeatTimer
       );
 
-      heartbeat = null;
+      heartbeatTimer =
+        null;
     }
   }
 
+  function sendToDM(
+    message
+  ) {
+    if (
+      conn &&
+      conn.open
+    ) {
+      try {
+        conn.send(
+          message
+        );
+      } catch {}
+    }
+  }
+
+  function isConnected() {
+    return !!(
+      conn &&
+      conn.open
+    );
+  }
+
+  function status() {
+    console.log(
+      '[Peer] Player status',
+      {
+        signaling:
+          !!peer &&
+          !peer.disconnected &&
+          !peer.destroyed,
+
+        connected:
+          isConnected(),
+
+        peerId:
+          peer?.id ||
+          null,
+      }
+    );
+  }
+
+  function destroy() {
+    destroyed =
+      true;
+
+    cancelReconnect();
+    stopHeartbeat();
+
+    try {
+      peer?.destroy();
+    } catch {}
+
+    peer =
+      null;
+
+    conn =
+      null;
+  }
+
   return {
-    start,
+    connect,
+    sendToDM,
+    isConnected,
+    reconnectNow,
+    cancelReconnect,
+    status,
+    destroy,
 
-    isConnected() {
-      return !!(
-        conn &&
-        conn.open
-      );
+    onMessage(cb) {
+      onMessage =
+        cb;
     },
 
-    send(data) {
-      if (
-        conn?.open
-      ) {
-        try {
-          conn.send(data);
-
-          log(
-            `→ DM ${data?.t || 'message'}`
-          );
-        } catch (error) {
-          log(
-            `send to DM failed: ` +
-            `${error.message}`
-          );
-        }
-      } else {
-        log(
-          `not sent; player has no ` +
-          `open DM connection`
-        );
-      }
+    onDisconnect(cb) {
+      onDisconnect =
+        cb;
     },
 
-    reconnectNow(reason = 'manual') {
-      if (
-        destroyed ||
-        explicitDisconnect ||
-        (
-          conn &&
-          conn.open
-        )
-      ) {
-        return;
-      }
-
-      if (reconnectTimer) {
-        clearTimeout(
-          reconnectTimer
-        );
-
-        reconnectTimer = null;
-      }
-
-      reconnectAttempt = 0;
-
-      log(
-        `reconnecting now: ${reason}`
-      );
-
-      if (
-        !peer ||
-        peer.destroyed
-      ) {
-        createPeer();
-      } else {
-        connectToDm();
-      }
+    onConnect(cb) {
+      onConnect =
+        cb;
     },
 
-    status() {
-      log(
-        `player peer: ` +
-        `signaling=${
-          peer?.disconnected
-            ? 'DISCONNECTED'
-            : peer?.destroyed
-              ? 'destroyed'
-              : peer
-                ? 'connected'
-                : 'none'
-        } | ` +
-        `DM channel=${
-          conn?.open
-            ? 'open'
-            : 'closed'
-        } | ` +
-        `attempts=${connectAttempt}`
-      );
-
-      if (conn) {
-        logConnectionStats(
-          conn,
-          'player status'
-        );
-      }
-    },
-
-    destroy() {
-      destroyed = true;
-      explicitDisconnect = true;
-
-      if (connectTimer) {
-        clearTimeout(
-          connectTimer
-        );
-      }
-
-      if (reconnectTimer) {
-        clearTimeout(
-          reconnectTimer
-        );
-      }
-
-      stopHeartbeat();
-
-      try {
-        conn?.close();
-      } catch {}
-
-      try {
-        peer?.destroy();
-      } catch {}
-
-      conn = null;
-      peer = null;
+    onReconnecting(cb) {
+      onReconnecting =
+        cb;
     },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Storage
-// ---------------------------------------------------------------------------
-
-function loadAllCampaigns() {
-  try {
-    return (
-      JSON.parse(
-        localStorage.getItem(
-          LS_CAMPAIGNS
-        )
-      ) || {}
-    );
-  } catch {
-    return {};
-  }
-}
-
-function saveCampaign(campaign) {
-  try {
-    const all =
-      loadAllCampaigns();
-
-    all[campaign.id] =
-      campaign;
-
-    localStorage.setItem(
-      LS_CAMPAIGNS,
-      JSON.stringify(all)
-    );
-  } catch (error) {
-    alert(
-      `Could not save campaign: ${error.message}`
-    );
-  }
-}
-
-function deleteCampaign(id) {
-  const all =
-    loadAllCampaigns();
-
-  delete all[id];
-
-  localStorage.setItem(
-    LS_CAMPAIGNS,
-    JSON.stringify(all)
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Log UI
-// ---------------------------------------------------------------------------
-
-function makeLog(
-  role,
-  onStatus
-) {
-  const pre =
-    h(
-      'pre',
-      {
-        class: 'log',
-      }
-    );
-
-  const log =
-    text => {
-      pre.textContent +=
-        `${new Date().toISOString().slice(11, 23)}  ${text}\n`;
-
-      pre.scrollTop =
-        pre.scrollHeight;
-
-      console.log(
-        `[vttrpg ${role}]`,
-        text
-      );
-    };
-
-  activeLog = log;
-
-  const toolbar =
-    h(
-      'div',
-      {
-        class: 'row',
-      },
-
-      onStatus
-        ? h(
-            'button',
-            {
-              onclick:
-                () =>
-                  onStatus(),
-            },
-            'Log status now'
-          )
-        : null,
-
-      h(
-        'button',
-        {
-          onclick:
-            async () => {
-              try {
-                await navigator.clipboard.writeText(
-                  `VTTRPG v${APP_VERSION} (${role})\n` +
-                  pre.textContent
-                );
-
-                log(
-                  'log copied to clipboard'
-                );
-              } catch (error) {
-                log(
-                  `copy failed: ${error.message}`
-                );
-              }
-            },
-        },
-        'Copy log'
-      ),
-
-      h(
-        'button',
-        {
-          onclick:
-            () => {
-              pre.textContent = '';
-            },
-        },
-        'Clear'
-      )
-    );
-
-  log(
-    `VTTRPG v${APP_VERSION} ${role} view started; ` +
-    `page ${location.pathname}`
-  );
-
-  log(
-    `env: online=${navigator.onLine} ` +
-    `secureContext=${isSecureContext} ` +
-    `RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'} ` +
-    `PeerJS=${window.Peer ? 'loaded' : 'MISSING'}`
-  );
-
-  log(
-    `browser: ${navigator.userAgent}`
-  );
-
-  return {
-    el:
-      h(
-        'div',
-        {},
-        toolbar,
-        pre
-      ),
-    log,
-  };
-}
-
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Chat
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 function makeChat(
   onSend
@@ -2112,7 +1237,8 @@ function makeChat(
     h(
       'div',
       {
-        class: 'chat',
+        class:
+          'chat',
       }
     );
 
@@ -2120,8 +1246,11 @@ function makeChat(
     h(
       'input',
       {
-        placeholder: 'Message…',
-        maxlength: '500',
+        placeholder:
+          'Message…',
+
+        maxlength:
+          '500',
       }
     );
 
@@ -2132,35 +1261,37 @@ function makeChat(
       'Send'
     );
 
-  const submit =
-    () => {
-      const text =
-        input.value.trim();
+  function send() {
+    const text =
+      input.value.trim();
 
-      if (!text) {
-        return;
-      }
+    if (!text) {
+      return;
+    }
 
-      onSend(text);
+    onSend(
+      text
+    );
 
-      input.value = '';
-      input.focus();
-    };
+    input.value =
+      '';
+  }
 
   input.addEventListener(
     'keydown',
     event => {
       if (
-        event.key === 'Enter'
+        event.key ===
+        'Enter'
       ) {
-        submit();
+        send();
       }
     }
   );
 
   button.addEventListener(
     'click',
-    submit
+    send
   );
 
   return {
@@ -2169,10 +1300,12 @@ function makeChat(
         'div',
         {},
         box,
+
         h(
           'div',
           {
-            class: 'row',
+            class:
+              'row',
           },
           input,
           button
@@ -2180,12 +1313,7 @@ function makeChat(
       ),
 
     add(message) {
-      const time =
-        new Date(
-          message.ts
-        ).toLocaleTimeString();
-
-      const row =
+      box.append(
         h(
           'div',
           {
@@ -2198,9 +1326,13 @@ function makeChat(
           h(
             'span',
             {
-              class: 'ts',
+              class:
+                'ts',
             },
-            `${time} `
+            new Date(
+              message.ts
+            ).toLocaleTimeString() +
+              ' '
           ),
 
           message.sys
@@ -2213,9 +1345,8 @@ function makeChat(
                 ),
                 message.text,
               ]
-        );
-
-      box.append(row);
+        )
+      );
 
       box.scrollTop =
         box.scrollHeight;
@@ -2225,7 +1356,9 @@ function makeChat(
       box.replaceChildren();
     },
 
-    setEnabled(enabled) {
+    setEnabled(
+      enabled
+    ) {
       input.disabled =
         !enabled;
 
@@ -2235,24 +1368,18 @@ function makeChat(
   };
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Router
-// ---------------------------------------------------------------------------
-
-const $app =
-  document.getElementById(
-    'app'
-  );
-
-let cleanup = null;
+// -----------------------------------------------------------------------------
 
 function route() {
-  if (cleanup) {
-    cleanup();
-    cleanup = null;
-  }
+  cleanup?.();
 
-  activeLog = null;
+  cleanup =
+    null;
+
+  activeLog =
+    null;
 
   $app.replaceChildren();
 
@@ -2273,27 +1400,30 @@ function route() {
     (
       match =
         hash.match(
-          /^\/join\/([a-z0-9]+)$/i
+          /^\/dm\/([a-z0-9]+)$/i
         )
     )
   ) {
-    return viewPlayer(
-      match[1],
-      parseOpts(query)
+    viewDM(
+      match[1]
     );
+
+    return;
   }
 
   if (
     (
       match =
         hash.match(
-          /^\/dm\/([a-z0-9]+)$/i
+          /^\/join\/([a-z0-9]+)$/i
         )
     )
   ) {
-    return viewDM(
+    viewPlayer(
       match[1]
     );
+
+    return;
   }
 
   viewHome();
@@ -2304,9 +1434,9 @@ window.addEventListener(
   route
 );
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Home
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 function viewHome() {
   const nameInput =
@@ -2318,17 +1448,92 @@ function viewHome() {
       }
     );
 
-  const campaignList =
+  const list =
     h('div');
 
-  const fileInput =
-    h(
-      'input',
-      {
-        type: 'file',
-        accept: 'application/json',
-      }
+  function renderList() {
+    const campaigns =
+      Object.values(
+        loadCampaigns()
+      );
+
+    list.replaceChildren(
+      ...(campaigns.length
+        ? campaigns.map(
+            campaign =>
+              h(
+                'div',
+                {
+                  class:
+                    'row',
+                },
+
+                h(
+                  'b',
+                  {},
+                  campaign.name
+                ),
+
+                h(
+                  'span',
+                  {
+                    class:
+                      'muted',
+                  },
+                  `${Object.keys(
+                    campaign.players || {}
+                  ).length} players, ` +
+                  `${(
+                    campaign.chat || []
+                  ).length} messages`
+                ),
+
+                h(
+                  'button',
+                  {
+                    onclick:
+                      () =>
+                        location.hash =
+                          '#/dm/' +
+                          campaign.id,
+                  },
+                  'Open as DM'
+                ),
+
+                h(
+                  'button',
+                  {
+                    onclick:
+                      () => {
+                        if (
+                          confirm(
+                            `Delete "${campaign.name}"?`
+                          )
+                        ) {
+                          deleteCampaign(
+                            campaign.id
+                          );
+
+                          renderList();
+                        }
+                      },
+                  },
+                  'Delete'
+                )
+              )
+          )
+        : [
+            h(
+              'div',
+              {
+                class:
+                  'muted',
+              },
+              'No campaigns yet.'
+            ),
+          ])
     );
+  }
 
   const create =
     () => {
@@ -2345,17 +1550,14 @@ function viewHome() {
 
         name,
 
-        created:
-          Date.now(),
-
         roomId:
           null,
 
-        players:
-          {},
-
         nextNum:
           1,
+
+        players:
+          {},
 
         chat:
           [],
@@ -2369,151 +1571,6 @@ function viewHome() {
         '#/dm/' +
         campaign.id;
     };
-
-  fileInput.addEventListener(
-    'change',
-    async event => {
-      const file =
-        event.target.files?.[0];
-
-      if (!file) {
-        return;
-      }
-
-      try {
-        const imported =
-          JSON.parse(
-            await file.text()
-          );
-
-        if (
-          !imported.id ||
-          !imported.name ||
-          typeof imported.players !== 'object' ||
-          !Array.isArray(
-            imported.chat
-          )
-        ) {
-          throw new Error(
-            'not a valid campaign file'
-          );
-        }
-
-        if (
-          loadAllCampaigns()[
-            imported.id
-          ] &&
-          !confirm(
-            'A campaign with this ID exists. Overwrite?'
-          )
-        ) {
-          return;
-        }
-
-        saveCampaign(
-          imported
-        );
-
-        renderList();
-      } catch (error) {
-        alert(
-          `Import failed: ${error.message}`
-        );
-      }
-
-      event.target.value = '';
-    }
-  );
-
-  function renderList() {
-    const all =
-      Object.values(
-        loadAllCampaigns()
-      );
-
-    if (!all.length) {
-      campaignList.replaceChildren(
-        h(
-          'div',
-          {
-            class: 'muted',
-          },
-          'No campaigns in this browser yet.'
-        )
-      );
-
-      return;
-    }
-
-    campaignList.replaceChildren(
-      ...all.map(
-        campaign =>
-          h(
-            'div',
-            {
-              class: 'row',
-            },
-
-            h(
-              'b',
-              {},
-              campaign.name
-            ),
-
-            h(
-              'span',
-              {
-                class:
-                  'muted',
-              },
-              `${Object.keys(
-                campaign.players || {}
-              ).length} players, ` +
-              `${(
-                campaign.chat || []
-              ).length} messages`
-            ),
-
-            h(
-              'button',
-              {
-                onclick:
-                  () =>
-                    (
-                      location.hash =
-                        '#/dm/' +
-                        campaign.id
-                    ),
-              },
-              'Open as DM'
-            ),
-
-            h(
-              'button',
-              {
-                onclick:
-                  () => {
-                    if (
-                      confirm(
-                        `Delete "${campaign.name}" from this browser?`
-                      )
-                    ) {
-                      deleteCampaign(
-                        campaign.id
-                      );
-
-                      renderList();
-                    }
-                  },
-              },
-              'Delete'
-            )
-          )
-      )
-    );
-  }
-
-  renderList();
 
   $app.append(
     h(
@@ -2529,7 +1586,8 @@ function viewHome() {
       h(
         'div',
         {
-          class: 'row',
+          class:
+            'row',
         },
 
         nameInput,
@@ -2552,78 +1610,52 @@ function viewHome() {
       h(
         'h2',
         {},
-        'Campaigns in this browser'
+        'Campaigns'
       ),
 
-      campaignList,
-
-      h(
-        'div',
-        {
-          class: 'muted',
-        },
-        'Import campaign file:'
-      ),
-
-      fileInput
+      list
     ),
 
     h(
       'section',
       {
-        class: 'muted',
+        class:
+          'muted',
       },
-
-      'Players simply need the join link. ' +
-      'There is no PIN in v0.7.1.'
+      'Players join using the QR code or join link.'
     )
   );
+
+  renderList();
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // DM
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
-function viewDM(cid) {
-  const all =
-    loadAllCampaigns();
-
+function viewDM(
+  campaignId
+) {
   const campaign =
-    all[cid];
+    loadCampaigns()[
+      campaignId
+    ];
 
   if (!campaign) {
-    location.hash = '#/';
+    location.hash =
+      '#/';
+
     return;
   }
 
-  if (
-    !campaign.players ||
-    typeof campaign.players !==
-      'object'
-  ) {
-    campaign.players = {};
-  }
+  let dmPeer =
+    null;
 
-  if (
-    !Array.isArray(
-      campaign.chat
-    )
-  ) {
-    campaign.chat = [];
-  }
+  let session =
+    null;
 
-  if (!campaign.nextNum) {
-    campaign.nextNum = 1;
-  }
-
-  const save =
-    () =>
-      saveCampaign(
-        campaign
-      );
-
-  const turnSaved =
-    getTurnFromLocalStorage();
+  const connections =
+    new Map();
 
   const {
     el: logEl,
@@ -2639,61 +1671,24 @@ function viewDM(cid) {
             )
     );
 
-  log(
-    `campaign "${campaign.name}" ` +
-    `(${cid}) loaded from localStorage: ` +
-    `${Object.keys(
-      campaign.players
-    ).length} known players, ` +
-    `${campaign.chat.length} chat messages`
-  );
-
-  const chat =
-    makeChat(
-      text =>
-        postChat({
-          from: 'DM',
-          text,
-        })
-    );
-
-  campaign.chat
-    .slice(-100)
-    .forEach(
-      chat.add
-    );
-
-  let dmPeer = null;
-  let session = null;
-  let opening = false;
-
-  const peers =
-    new Map();
-
-  const badRequests =
-    new Map();
-
   const modeSelect =
     h(
       'select',
       {
         onchange:
-          () => {
-            if (session) {
+          () =>
+            session &&
+            (
               session.mode =
-                modeSelect.value;
-            }
-
-            log(
-              `join mode -> ${modeSelect.value}`
-            );
-          },
+                modeSelect.value
+            ),
       },
 
       h(
         'option',
         {
-          value: 'approval',
+          value:
+            'approval',
         },
         'Approval required'
       ),
@@ -2701,21 +1696,23 @@ function viewDM(cid) {
       h(
         'option',
         {
-          value: 'open',
+          value:
+            'open',
         },
-        'Open (auto-approve)'
+        'Open'
       ),
 
       h(
         'option',
         {
-          value: 'locked',
+          value:
+            'locked',
         },
-        'Locked (known players only)'
+        'Locked'
       )
     );
 
-  const toggleButton =
+  const sessionButton =
     h(
       'button',
       {
@@ -2728,1227 +1725,101 @@ function viewDM(cid) {
       'Open session'
     );
 
-  const signalingStatus =
-    h(
-      'span',
-      {
-        class: 'tag',
-      },
-      'no session'
-    );
-
-  const joinLinkInput =
-    h(
-      'input',
-      {
-        readonly: '',
-        placeholder:
-          'Open the session to generate the join link',
-      }
-    );
-
-  const copyButton =
-    h(
-      'button',
-      {
-        onclick:
-          async () => {
-            try {
-              await navigator.clipboard.writeText(
-                joinLinkInput.value
-              );
-
-              log(
-                'join link copied'
-              );
-            } catch {
-              log(
-                'clipboard write failed'
-              );
-            }
-          },
-      },
-      'Copy link'
-    );
-
-  const qrEl =
-    h(
-      'div',
-      {
-        class: 'qr',
-      }
-    );
-
-  const lobbyEl =
-    h('div');
-
-  const playersEl =
-    h('div');
-
-  const turnUrls =
-    h(
-      'input',
-      {
-        placeholder:
-          'turn:host:3478, turns:host:443?transport=tcp',
-
-        value:
-          turnSaved.urls || '',
-      }
-    );
-
-  const turnUser =
-    h(
-      'input',
-      {
-        placeholder:
-          'TURN username',
-
-        value:
-          turnSaved.username || '',
-      }
-    );
-
-  const turnCred =
-    h(
-      'input',
-      {
-        type: 'password',
-
-        placeholder:
-          'TURN credential',
-
-        value:
-          turnSaved.credential || '',
-      }
-    );
-
-  const relayCheck =
-    h(
-      'input',
-      {
-        type: 'checkbox',
-
-        checked:
-          false,
-      }
-    );
-
-  const turnTestStatus =
+  const status =
     h(
       'span',
       {
         class:
-          'muted',
+          'tag',
+      },
+      'closed'
+    );
+
+  const linkInput =
+    h(
+      'input',
+      {
+        readonly:
+          '',
+
+        placeholder:
+          'Session link appears here',
       }
+    );
+
+  const qr =
+    h(
+      'div',
+      {
+        id:
+          'qr',
+      }
+    );
+
+  const lobby =
+    h('div');
+
+  const players =
+    h('div');
+
+  const chat =
+    makeChat(
+      text =>
+        postChat(
+          'DM',
+          text
+        )
     );
 
   chat.setEnabled(
     false
   );
 
-  const readTurn =
-    () => {
-      const urls =
-        turnUrls.value
-          .split(',')
-          .map(
-            x =>
-              x.trim()
-          )
-          .filter(Boolean);
-
-      const turn =
-        urls.length
-          ? {
-              urls,
-              username:
-                turnUser.value.trim(),
-              credential:
-                turnCred.value.trim(),
-            }
-          : null;
-
-      saveTurnToLocalStorage({
-        urls:
-          turnUrls.value,
-
-        username:
-          turnUser.value.trim(),
-
-        credential:
-          turnCred.value.trim(),
-      });
-
-      return turn;
-    };
-
-  const approvedPeerIds =
-    () =>
-      [
-        ...peers,
-      ]
-        .filter(
-          ([, player]) =>
-            player.status ===
-            'approved'
-        )
-        .map(
-          ([pid]) =>
-            pid
-        );
-
-  const findPeerForToken =
-    token =>
-      [
-        ...peers,
-      ].find(
-        ([, player]) =>
-          player.token ===
-          token
-      )?.[0] ||
-      null;
-
-  const roster =
-    () =>
-      Object.values(
-        campaign.players
-      )
-        .filter(
-          player =>
-            !player.banned
-        )
-        .map(
-          player => ({
-            num:
-              player.num,
-
-            name:
-              player.name,
-
-            online:
-              [
-                ...peers.values(),
-              ].some(
-                live =>
-                  live.token ===
-                    player.token &&
-                  live.status ===
-                    'approved'
-              ),
-          })
-        );
-
-  const broadcastRoster =
-    () => {
-      for (
-        const pid of
-        approvedPeerIds()
-      ) {
-        dmPeer?.send(
-          {
-            t:
-              'roster',
-
-            roster:
-              roster(),
-          },
-          pid
-        );
-      }
-    };
-
-  function sendTo(
-    data,
-    pid
-  ) {
-    dmPeer?.send(
-      data,
-      pid
-    );
-  }
-
-  async function testTurn() {
-    const turn =
-      readTurn();
-
-    if (!turn) {
-      turnTestStatus.textContent =
-        'Enter TURN URL, username and credential first.';
-
-      return;
-    }
-
-    turnTestStatus.textContent =
-      'testing…';
-
-    log(
-      `TURN test: asking ${turn.urls.join(', ')} for a relay address…`
-    );
-
-    const pc =
-      new RTCPeerConnection({
-        iceServers: [
-          {
-            urls:
-              turn.urls,
-
-            username:
-              turn.username,
-
-            credential:
-              turn.credential,
-          },
-        ],
-
-        iceTransportPolicy:
-          'relay',
-
-        iceCandidatePoolSize:
-          2,
-      });
-
-    pc.createDataChannel(
-      'turn-test'
-    );
-
-    let finished =
-      false;
-
-    const finish =
-      (
-        ok,
-        message
-      ) => {
-        if (finished) {
-          return;
-        }
-
-        finished = true;
-
-        try {
-          pc.close();
-        } catch {}
-
-        turnTestStatus.textContent =
-          `${ok ? 'OK' : 'FAILED'}: ${message}`;
-
-        log(
-          `TURN test ${ok ? 'OK' : 'FAILED'}: ${message}`
-        );
-      };
-
-    const timeout =
-      setTimeout(
-        () =>
-          finish(
-            false,
-            'no relay candidate received'
-          ),
-        10000
-      );
-
-    pc.addEventListener(
-      'icecandidate',
-      event => {
-        if (!event.candidate) {
-          return;
-        }
-
-        const candidate =
-          event.candidate
-            .candidate || '';
-
-        if (
-          candidateTypeFromLine(
-            candidate
-          ) === 'relay'
-        ) {
-          clearTimeout(
-            timeout
-          );
-
-          finish(
-            true,
-            'TURN relay candidate received'
-          );
-        }
-      }
-    );
-
-    pc.addEventListener(
-      'icecandidateerror',
-      event => {
-        log(
-          `TURN test ICE error: ` +
-          `${event.errorCode || ''} ` +
-          `${event.url || ''} ` +
-          `${event.errorText || ''}`
-        );
-      }
-    );
-
-    try {
-      const offer =
-        await pc.createOffer();
-
-      await pc.setLocalDescription(
-        offer
-      );
-    } catch (error) {
-      clearTimeout(
-        timeout
-      );
-
-      finish(
-        false,
-        error.message
-      );
-    }
-  }
-
-  async function openSession() {
-    if (
-      opening ||
-      session
-    ) {
-      return;
-    }
-
-    opening = true;
-
-    toggleButton.disabled =
-      true;
-
-    signalingStatus.textContent =
-      'connecting…';
-
-    if (!campaign.roomId) {
-      campaign.roomId =
-        rid(14);
-
-      save();
-
-      log(
-        `created stable room id ${campaign.roomId}`
-      );
-    }
-
-    const room =
-      campaign.roomId;
-
-    const turn =
-      readTurn();
-
-    const relayOnly =
-      relayCheck.checked;
-
-    log(
-      `opening session: ` +
-      `mode=${modeSelect.value}, ` +
-      `room=${room}`
-    );
-
-    const peerTransport =
-      createDMPeer(
-        room,
-        {
-          log,
-
-          turn,
-
-          relayOnly,
-
-          onPlayerConnect:
-            pid => {
-              log(
-                `player connected ${short(pid)} ` +
-                `– waiting for join request`
-              );
-            },
-
-          onPlayerDisconnect:
-            pid => {
-              badRequests.delete(
-                pid
-              );
-
-              const player =
-                peers.get(
-                  pid
-                );
-
-              if (player) {
-                log(
-                  `${player.name} ` +
-                  `(${player.status}) left`
-                );
-
-                if (
-                  player.status ===
-                  'approved'
-                ) {
-                  systemMsg(
-                    `${player.name} ` +
-                    `(Player ${player.num}) disconnected`
-                  );
-                }
-
-                peers.delete(
-                  pid
-                );
-
-                renderPeople();
-                broadcastRoster();
-              }
-            },
-
-          onMessage:
-            (message, pid) =>
-              onMsg(
-                message,
-                pid
-              ),
-
-          onSignaling:
-            state => {
-              signalingStatus.textContent =
-                state ===
-                  'connected'
-                  ? 'signaling OK'
-                  : 'signaling reconnecting…';
-            },
-        }
-      );
-
-    try {
-      await peerTransport.init();
-    } catch (error) {
-      log(
-        `COULD NOT OPEN SESSION: ` +
-        `${error.message}`
-      );
-
-      peerTransport.destroy();
-
-      opening = false;
-
-      toggleButton.disabled =
-        false;
-
-      signalingStatus.textContent =
-        'failed';
-
-      return;
-    }
-
-    dmPeer =
-      peerTransport;
-
-    session = {
-      mode:
-        modeSelect.value,
-
-      room:
-        campaign.roomId,
-    };
-
-    opening = false;
-
-    toggleButton.disabled =
-      false;
-
-    toggleButton.textContent =
-      'Close session';
-
-    modeSelect.disabled =
-      true;
-
-    chat.setEnabled(
-      true
-    );
-
-    const query =
-      [
-        turn
-          ? `t=${encodeURIComponent(
-              b64e(turn)
-            )}`
-          : '',
-
-        relayOnly
-          ? 'r=1'
-          : '',
-      ]
-        .filter(Boolean)
-        .join('&');
-
-    const link =
-      `${location.origin}${location.pathname}` +
-      `#/join/${campaign.roomId}` +
-      `${query ? '?' + query : ''}`;
-
-    joinLinkInput.value =
-      link;
-
-    qrEl.replaceChildren();
-
-    if (
-      window.QRCode
-    ) {
-      new window.QRCode(
-        qrEl,
-        {
-          text:
-            link,
-
-          width:
-            220,
-
-          height:
-            220,
-
-          correctLevel:
-            window.QRCode.CorrectLevel
-              ?.M ||
-            0,
-        }
-      );
-
-      log(
-        'QR code generated'
-      );
-    } else {
-      qrEl.append(
-        h(
-          'div',
-          {
-            class: 'muted',
-          },
-          'QR library not loaded.'
-        )
-      );
-    }
-
-    signalingStatus.textContent =
-      'signaling OK';
-
-    log(
-      `SESSION OPEN – stable DM peer ID is ` +
-      `"${PEER_PREFIX}${campaign.roomId}".`
-    );
-
-    if (turn) {
-      log(
-        'WARNING: TURN credentials are embedded ' +
-        'in the join link.'
-      );
-    }
-
-    if (relayOnly) {
-      log(
-        'RELAY-ONLY test mode enabled.'
-      );
-    }
-
-    renderPeople();
-  }
-
-  function closeSession() {
-    if (!session) {
-      return;
-    }
-
-    log(
-      `closing session; notifying ` +
-      `${peers.size} player connection(s)`
-    );
-
-    for (
-      const pid of
-      approvedPeerIds()
-    ) {
-      sendTo(
-        {
-          t:
-            'closed',
-        },
-        pid
-      );
-    }
-
-    const transport =
-      dmPeer;
-
-    peers.clear();
-    badRequests.clear();
-
-    dmPeer = null;
-    session = null;
-
-    modeSelect.disabled =
-      false;
-
-    toggleButton.textContent =
-      'Open session';
-
-    signalingStatus.textContent =
-      'no session';
-
-    joinLinkInput.value =
-      '';
-
-    qrEl.replaceChildren();
-
-    chat.setEnabled(
-      false
-    );
-
-    setTimeout(
-      () => {
-        transport?.destroy();
-      },
-      300
-    );
-
-    log(
-      'session closed'
-    );
-
-    renderPeople();
-  }
-
-  function onMsg(
-    message,
-    pid
-  ) {
-    if (
-      !message ||
-      typeof message !==
-        'object'
-    ) {
-      return;
-    }
-
-    if (!session) {
-      log(
-        `ignored ${message.t} from ` +
-        `${short(pid)}: no open session`
-      );
-
-      return;
-    }
-
-    if (
-      message.t ===
-      'join'
-    ) {
-      handleJoin(
-        message,
-        pid
-      );
-
-      return;
-    }
-
-    const player =
-      peers.get(
-        pid
-      );
-
-    if (
-      !player ||
-      player.status !==
-        'approved'
-    ) {
-      log(
-        `ignored ${message.t} from ` +
-        `${short(pid)}: not approved`
-      );
-
-      return;
-    }
-
-    if (
-      message.t ===
-      'chat'
-    ) {
-      const text =
-        String(
-          message.text || ''
-        )
-          .trim()
-          .slice(
-            0,
-            500
-          );
-
-      if (!text) {
-        return;
-      }
-
-      postChat({
-        from:
-          `${player.name} (P${player.num})`,
-
-        text,
-      });
-
-      return;
-    }
-
-    if (
-      message.t ===
-      'ping'
-    ) {
-      return;
-    }
-
-    log(
-      `unknown player message ` +
-      `"${message.t}"`
-    );
-  }
-
-  function handleJoin(
-    message,
-    pid
-  ) {
-    const token =
-      String(
-        message.token || ''
-      )
-        .slice(
-          0,
-          64
-        );
-
-    const name =
-      String(
-        message.name || ''
-      )
-        .trim()
-        .slice(
-          0,
-          30
-        ) ||
-      'Player';
-
-    if (!token) {
-      log(
-        `join request from ${short(pid)} ` +
-        `without identity token`
-      );
-
-      return;
-    }
-
-    const known =
-      campaign.players[
-        token
-      ];
-
-    log(
-      `JOIN REQUEST from ${short(pid)} ` +
-      `"${name}" ` +
-      `token ${token.slice(0, 6)}… ` +
-      (
-        known
-          ? `(known: Player ${known.num}` +
-            `${
-              known.banned
-                ? ', BANNED'
-                : ''
-            })`
-          : '(new player)'
-      ) +
-      ` – mode ${session.mode}`
-    );
-
-    if (
-      known?.banned
-    ) {
-      log(
-        `-> denied: player is banned`
-      );
-
-      sendTo(
-        {
-          t:
-            'denied',
-
-          reason:
-            'You are banned.',
-        },
-        pid
-      );
-
-      return;
-    }
-
-    // Disconnect another live connection
-    // belonging to the same identity token.
-    for (
-      const [
-        otherPid,
-        other
-      ] of peers
-    ) {
-      if (
-        other.token ===
-          token &&
-        otherPid !== pid
-      ) {
-        log(
-          `dropping older connection ` +
-          `${short(otherPid)} ` +
-          `for the same player token`
-        );
-
-        peers.delete(
-          otherPid
-        );
-
-        dmPeer?.close(
-          otherPid
-        );
-      }
-    }
-
-    if (known) {
-      known.name =
-        name;
-
-      save();
-
-      peers.set(
-        pid,
-        {
-          token,
-          name,
-          status:
-            'approved',
-          num:
-            known.num,
-        }
-      );
-
-      sendAccepted(
-        pid
-      );
-
-      systemMsg(
-        `${name} ` +
-        `(Player ${known.num}) reconnected`
-      );
-
-      renderPeople();
-      broadcastRoster();
-
-      return;
-    }
-
-    if (
-      session.mode ===
-      'locked'
-    ) {
-      log(
-        '-> denied: session is locked'
-      );
-
-      sendTo(
-        {
-          t:
-            'denied',
-
-          reason:
-            'Session is locked.',
-        },
-        pid
-      );
-
-      return;
-    }
-
-    peers.set(
-      pid,
-      {
-        token,
-        name,
-        status:
-          'pending',
-        num:
-          null,
-      }
-    );
-
-    if (
-      session.mode ===
-      'open'
-    ) {
-      approve(
-        pid
-      );
-
-      return;
-    }
-
-    log(
-      '-> waiting for DM approval'
-    );
-
-    sendTo(
-      {
-        t:
-          'pending',
-      },
-      pid
-    );
-
-    renderPeople();
-  }
-
-  function approve(
-    pid
-  ) {
-    const player =
-      peers.get(
-        pid
-      );
-
-    if (!player) {
-      return;
-    }
-
-    if (
-      player.status ===
-      'approved'
-    ) {
-      return;
-    }
-
-    const num =
-      campaign.nextNum++;
-
-    campaign.players[
-      player.token
-    ] = {
-      token:
-        player.token,
-
-      num,
-
-      name:
-        player.name,
-
-      banned:
-        false,
-    };
-
-    player.status =
-      'approved';
-
-    player.num =
-      num;
-
-    save();
-
-    log(
-      `APPROVED ${player.name} ` +
-      `as Player ${num}`
-    );
-
-    sendAccepted(
-      pid
-    );
-
-    systemMsg(
-      `${player.name} joined as Player ${num}`
-    );
-
-    renderPeople();
-    broadcastRoster();
-  }
-
-  function sendAccepted(
-    pid
-  ) {
-    const player =
-      peers.get(
-        pid
-      );
-
-    if (!player) {
-      return;
-    }
-
-    const history =
+  campaign.chat =
+    Array.isArray(
       campaign.chat
-        .slice(-100);
+    )
+      ? campaign.chat
+      : [];
 
-    log(
-      `sending accepted + ` +
-      `${history.length} history message(s) ` +
-      `to Player ${player.num}`
+  campaign.chat
+    .slice(-100)
+    .forEach(
+      chat.add
     );
 
-    sendTo(
-      {
-        t:
-          'accepted',
+  log(
+    `campaign "${campaign.name}" (${campaignId}) loaded from localStorage: ` +
+    `${Object.keys(campaign.players || {}).length} known players, ` +
+    `${campaign.chat.length} chat messages`
+  );
 
-        num:
-          player.num,
-
-        name:
-          player.name,
-
-        campaignName:
-          campaign.name,
-
-        history,
-
-        roster:
-          roster(),
-      },
-      pid
-    );
+  function approvedPeerIds() {
+    return [
+      ...connections.entries(),
+    ]
+      .filter(
+        ([, player]) =>
+          player.status ===
+          'approved'
+      )
+      .map(
+        ([peerId]) =>
+          peerId
+      );
   }
 
-  function deny(
-    pid
+  function broadcast(
+    message
   ) {
-    const player =
-      peers.get(
-        pid
-      );
-
-    if (!player) {
-      return;
-    }
-
-    sendTo(
-      {
-        t:
-          'denied',
-
-        reason:
-          'The DM declined your request.',
-      },
-      pid
+    dmPeer?.broadcast(
+      message
     );
-
-    peers.delete(
-      pid
-    );
-
-    setTimeout(
-      () => {
-        dmPeer?.close(
-          pid
-        );
-      },
-      200
-    );
-
-    renderPeople();
-  }
-
-  function kick(
-    token,
-    ban
-  ) {
-    const pid =
-      findPeerForToken(
-        token
-      );
-
-    if (pid) {
-      sendTo(
-        {
-          t:
-            ban
-              ? 'banned'
-              : 'kicked',
-        },
-        pid
-      );
-
-      peers.delete(
-        pid
-      );
-
-      setTimeout(
-        () => {
-          dmPeer?.close(
-            pid
-          );
-        },
-        200
-      );
-    }
-
-    if (
-      ban &&
-      campaign.players[
-        token
-      ]
-    ) {
-      campaign.players[
-        token
-      ].banned =
-        true;
-
-      save();
-    }
-
-    log(
-      `${ban ? 'BANNED' : 'KICKED'} ` +
-      `token ${token.slice(0, 6)}…`
-    );
-
-    renderPeople();
-    broadcastRoster();
-  }
-
-  function unban(
-    token
-  ) {
-    if (
-      !campaign.players[
-        token
-      ]
-    ) {
-      return;
-    }
-
-    campaign.players[
-      token
-    ].banned =
-      false;
-
-    save();
-
-    log(
-      `unbanned token ${token.slice(0, 6)}…`
-    );
-
-    renderPeople();
-  }
-
-  function systemMsg(
-    text
-  ) {
-    postChat({
-      sys:
-        true,
-
-      text,
-    });
   }
 
   function postChat(
-    partial
+    from,
+    text
   ) {
     const message = {
       id:
@@ -3957,7 +1828,11 @@ function viewDM(cid) {
       ts:
         Date.now(),
 
-      ...partial,
+      from,
+
+      text:
+        String(text || '')
+          .slice(0, 500),
     };
 
     campaign.chat.push(
@@ -3966,42 +1841,186 @@ function viewDM(cid) {
 
     if (
       campaign.chat.length >
-      MAX_CHAT
+      1000
     ) {
       campaign.chat.splice(
         0,
         campaign.chat.length -
-          MAX_CHAT
+          1000
       );
     }
 
-    save();
+    saveCampaign(
+      campaign
+    );
 
     chat.add(
       message
     );
 
-    for (
-      const pid of
-      approvedPeerIds()
-    ) {
-      sendTo(
-        {
-          t:
-            'chat',
+    broadcast({
+      type:
+        'chat',
 
-          msg:
-            message,
-        },
-        pid
-      );
-    }
+      msg:
+        message,
+    });
   }
 
-  function renderPeople() {
+  function systemMessage(
+    text
+  ) {
+    const message = {
+      id:
+        rid(8),
+
+      ts:
+        Date.now(),
+
+      sys:
+        true,
+
+      text,
+    };
+
+    campaign.chat.push(
+      message
+    );
+
+    saveCampaign(
+      campaign
+    );
+
+    chat.add(
+      message
+    );
+
+    broadcast({
+      type:
+        'chat',
+
+      msg:
+        message,
+    });
+  }
+
+  function renderPlayers() {
+    const entries =
+      Object.entries(
+        campaign.players || {}
+      );
+
+    players.replaceChildren(
+      ...(entries.length
+        ? entries.map(
+            ([
+              token,
+              player,
+            ]) => {
+              const live =
+                [
+                  ...connections.values(),
+                ].some(
+                  connection =>
+                    connection.token ===
+                      token &&
+                    connection.status ===
+                      'approved'
+                );
+
+              return h(
+                'div',
+                {
+                  class:
+                    'row',
+                },
+
+                h(
+                  'b',
+                  {},
+                  `Player ${player.num}: ${player.name}`
+                ),
+
+                h(
+                  'span',
+                  {
+                    class:
+                      'tag',
+                  },
+                  player.banned
+                    ? 'banned'
+                    : live
+                      ? 'online'
+                      : 'offline'
+                ),
+
+                player.banned
+                  ? h(
+                      'button',
+                      {
+                        onclick:
+                          () => {
+                            player.banned =
+                              false;
+
+                            saveCampaign(
+                              campaign
+                            );
+
+                            renderPlayers();
+                          },
+                      },
+                      'Unban'
+                    )
+                  : [
+                      live
+                        ? h(
+                            'button',
+                            {
+                              onclick:
+                                () =>
+                                  kickPlayer(
+                                    token,
+                                    false
+                                  ),
+                            },
+                            'Kick'
+                          )
+                        : null,
+
+                      h(
+                        'button',
+                        {
+                          onclick:
+                            () =>
+                              kickPlayer(
+                                token,
+                                true
+                              ),
+                        },
+                        'Ban'
+                      ),
+                    ]
+              );
+            }
+          )
+        : [
+            h(
+              'div',
+              {
+                class:
+                  'muted',
+              },
+              'No players yet.'
+            ),
+          ])
+    );
+  }
+
+  function renderLobby() {
     const pending =
       [
-        ...peers.entries(),
+        ...connections.entries(),
       ]
         .filter(
           ([, player]) =>
@@ -4009,11 +2028,11 @@ function viewDM(cid) {
             'pending'
         );
 
-    lobbyEl.replaceChildren(
+    lobby.replaceChildren(
       ...(pending.length
         ? pending.map(
             ([
-              pid,
+              peerId,
               player,
             ]) =>
               h(
@@ -4044,7 +2063,7 @@ function viewDM(cid) {
                     onclick:
                       () =>
                         approve(
-                          pid
+                          peerId
                         ),
                   },
                   'Approve'
@@ -4056,7 +2075,7 @@ function viewDM(cid) {
                     onclick:
                       () =>
                         deny(
-                          pid
+                          peerId
                         ),
                   },
                   'Deny'
@@ -4074,178 +2093,635 @@ function viewDM(cid) {
             ),
           ])
     );
+  }
 
-    const known =
-      Object.entries(
-        campaign.players
-      );
+  function roster() {
+    return Object.values(
+      campaign.players || {}
+    )
+      .filter(
+        player =>
+          !player.banned
+      )
+      .map(
+        player => ({
+          num:
+            player.num,
 
-    playersEl.replaceChildren(
-      ...(known.length
-        ? known.map(
-            ([
-              token,
-              player,
-            ]) =>
-              h(
-                'div',
-                {
-                  class:
-                    'player-row',
-                },
+          name:
+            player.name,
 
-                h(
-                  'div',
-                  {
-                    class:
-                      'player-main',
-                  },
-
-                  h(
-                    'b',
-                    {},
-                    `Player ${player.num}: ${player.name}`
-                  ),
-
-                  h(
-                    'span',
-                    {
-                      class:
-                        'tag',
-                    },
-                    player.banned
-                      ? 'banned'
-                      : (
-                        [
-                          ...peers.values(),
-                        ].some(
-                          live =>
-                            live.token ===
-                              token &&
-                            live.status ===
-                              'approved'
-                        )
-                          ? 'online'
-                          : 'offline'
-                      )
-                  )
-                ),
-
-                h(
-                  'div',
-                  {
-                    class:
-                      'player-actions',
-                  },
-
-                  player.banned
-                    ? h(
-                        'button',
-                        {
-                          onclick:
-                            () =>
-                              unban(
-                                token
-                              ),
-                        },
-                        'Unban'
-                      )
-                    : [
-                        h(
-                          'button',
-                          {
-                            onclick:
-                              () =>
-                                kick(
-                                  token,
-                                  false
-                                ),
-                          },
-                          'Kick'
-                        ),
-
-                        h(
-                          'button',
-                          {
-                            onclick:
-                              () =>
-                                kick(
-                                  token,
-                                  true
-                                ),
-                          },
-                          'Ban'
-                        ),
-                      ]
-                )
-              )
-          )
-        : [
-            h(
-              'div',
-              {
-                class:
-                  'muted',
-              },
-              'No players yet.'
+          online:
+            [
+              ...connections.values(),
+            ].some(
+              connection =>
+                connection.status ===
+                  'approved' &&
+                connection.token ===
+                  player.token
             ),
-          ])
+        })
+      );
+  }
+
+  function sendAccepted(
+    peerId,
+    player
+  ) {
+    dmPeer?.sendToPlayer(
+      peerId,
+      {
+        type:
+          'accepted',
+
+        num:
+          player.num,
+
+        name:
+          player.name,
+
+        campaignName:
+          campaign.name,
+
+        history:
+          campaign.chat.slice(
+            -100
+          ),
+
+        roster:
+          roster(),
+      }
     );
   }
 
-  function exportCampaign() {
-    const blob =
-      new Blob(
-        [
-          JSON.stringify(
-            campaign,
-            null,
-            2
-          ),
-        ],
+  function approve(
+    peerId
+  ) {
+    const connection =
+      connections.get(
+        peerId
+      );
+
+    if (!connection) {
+      return;
+    }
+
+    if (
+      connection.status ===
+      'approved'
+    ) {
+      return;
+    }
+
+    const token =
+      connection.token;
+
+    if (
+      campaign.players[
+        token
+      ]
+    ) {
+      connection.status =
+        'approved';
+
+      connection.num =
+        campaign.players[
+          token
+        ].num;
+
+      sendAccepted(
+        peerId,
+        campaign.players[
+          token
+        ]
+      );
+
+      renderLobby();
+      renderPlayers();
+
+      return;
+    }
+
+    const num =
+      campaign.nextNum++;
+
+    const player = {
+      token,
+
+      num,
+
+      name:
+        connection.name,
+
+      banned:
+        false,
+    };
+
+    campaign.players[
+      token
+    ] =
+      player;
+
+    connection.status =
+      'approved';
+
+    connection.num =
+      num;
+
+    saveCampaign(
+      campaign
+    );
+
+    sendAccepted(
+      peerId,
+      player
+    );
+
+    systemMessage(
+      `${player.name} joined as Player ${num}`
+    );
+
+    renderLobby();
+    renderPlayers();
+  }
+
+  function deny(
+    peerId
+  ) {
+    dmPeer?.sendToPlayer(
+      peerId,
+      {
+        type:
+          'denied',
+
+        reason:
+          'The DM declined your request.',
+      }
+    );
+
+    connections.delete(
+      peerId
+    );
+
+    setTimeout(
+      () =>
+        dmPeer?.close?.(
+          peerId
+        ),
+      100
+    );
+
+    renderLobby();
+  }
+
+  function kickPlayer(
+    token,
+    ban
+  ) {
+    let peerId =
+      null;
+
+    for (
+      const [
+        id,
+        player,
+      ] of connections
+    ) {
+      if (
+        player.token ===
+        token
+      ) {
+        peerId =
+          id;
+
+        break;
+      }
+    }
+
+    if (peerId) {
+      dmPeer?.sendToPlayer(
+        peerId,
         {
           type:
-            'application/json',
+            ban
+              ? 'banned'
+              : 'kicked',
         }
       );
 
-    const url =
-      URL.createObjectURL(
-        blob
+      connections.delete(
+        peerId
       );
+    }
 
-    const link =
-      h(
-        'a',
-        {
-          href:
-            url,
+    if (
+      campaign.players[
+        token
+      ]
+    ) {
+      campaign.players[
+        token
+      ].banned =
+        ban;
 
-          download:
-            `${campaign.name.replace(
-              /[^\w-]+/g,
-              '_'
-            )}.vttrpg.json`,
-        }
+      if (ban) {
+        campaign.players[
+          token
+        ].approved =
+          false;
+      }
+
+      saveCampaign(
+        campaign
       );
+    }
 
-    document.body.append(
-      link
-    );
-
-    link.click();
-    link.remove();
-
-    URL.revokeObjectURL(
-      url
-    );
-
-    log(
-      'campaign exported'
-    );
+    renderPlayers();
+    renderLobby();
   }
 
-  renderPeople();
+  function openSession() {
+    if (session) {
+      return;
+    }
+
+    if (!campaign.roomId) {
+      campaign.roomId =
+        rid(14);
+
+      saveCampaign(
+        campaign
+      );
+
+      log(
+        `created stable room id ${campaign.roomId}`
+      );
+    }
+
+    sessionButton.disabled =
+      true;
+
+    log(
+      `opening session: mode=${modeSelect.value}, room=${campaign.roomId}`
+    );
+
+    const transport =
+      createDMPeer(
+        campaign.roomId
+      );
+
+    transport.onPlayerConnect(
+      peerId => {
+        log(
+          `incoming connection from ${short(peerId)}`
+        );
+      }
+    );
+
+    transport.onPlayerDisconnect(
+      peerId => {
+        const player =
+          connections.get(
+            peerId
+          );
+
+        if (player) {
+          log(
+            `${player.name} disconnected`
+          );
+        }
+
+        connections.delete(
+          peerId
+        );
+
+        renderLobby();
+        renderPlayers();
+      }
+    );
+
+    transport.onPlayerMessage(
+      (
+        peerId,
+        data
+      ) => {
+        if (!data) {
+          return;
+        }
+
+        if (
+          data.type ===
+          'join'
+        ) {
+          handleJoin(
+            peerId,
+            data
+          );
+
+          return;
+        }
+
+        const player =
+          connections.get(
+            peerId
+          );
+
+        if (
+          !player ||
+          player.status !==
+            'approved'
+        ) {
+          return;
+        }
+
+        if (
+          data.type ===
+          'chat'
+        ) {
+          const text =
+            String(
+              data.text || ''
+            )
+              .trim()
+              .slice(0, 500);
+
+          if (text) {
+            postChat(
+              `${player.name} (P${player.num})`,
+              text
+            );
+          }
+        }
+      }
+    );
+
+    transport.onSignalingDisconnect(
+      () => {
+        status.textContent =
+          'signaling lost';
+
+        log(
+          'PeerJS signaling disconnected'
+        );
+      }
+    );
+
+    transport.onSignalingReconnect(
+      () => {
+        status.textContent =
+          'signaling OK';
+
+        log(
+          'PeerJS signaling reconnected'
+        );
+      }
+    );
+
+    transport.init()
+      .then(
+        () => {
+          dmPeer =
+            transport;
+
+          session = {
+            mode:
+              modeSelect.value,
+          };
+
+          const link =
+            `${location.origin}` +
+            `${location.pathname}` +
+            `#/join/${campaign.roomId}`;
+
+          linkInput.value =
+            link;
+
+          qr.replaceChildren();
+
+          if (
+            window.QRCode
+          ) {
+            new window.QRCode(
+              qr,
+              {
+                text:
+                  link,
+
+                width:
+                  220,
+
+                height:
+                  220,
+              }
+            );
+          }
+
+          status.textContent =
+            'signaling OK';
+
+          sessionButton.disabled =
+            false;
+
+          sessionButton.textContent =
+            'Close session';
+
+          modeSelect.disabled =
+            true;
+
+          chat.setEnabled(
+            true
+          );
+
+          log(
+            `SESSION OPEN – DM peer id is ${PEER_PREFIX}${campaign.roomId}`
+          );
+
+          renderLobby();
+          renderPlayers();
+        }
+      )
+      .catch(
+        error => {
+          log(
+            `COULD NOT OPEN SESSION: ${error.message}`
+          );
+
+          transport.destroy();
+
+          sessionButton.disabled =
+            false;
+        }
+      );
+  }
+
+  function handleJoin(
+    peerId,
+    data
+  ) {
+    const token =
+      String(
+        data.token || ''
+      )
+        .slice(0, 64);
+
+    const name =
+      String(
+        data.name || 'Player'
+      )
+        .trim()
+        .slice(0, 30);
+
+    if (!token) {
+      return;
+    }
+
+    const saved =
+      campaign.players[
+        token
+      ];
+
+    if (
+      saved?.banned
+    ) {
+      dmPeer?.sendToPlayer(
+        peerId,
+        {
+          type:
+            'denied',
+
+          reason:
+            'You are banned.',
+        }
+      );
+
+      return;
+    }
+
+    connections.set(
+      peerId,
+      {
+        token,
+
+        name:
+          name || 'Player',
+
+        status:
+          saved
+            ? 'approved'
+            : 'pending',
+
+        num:
+          saved
+            ? saved.num
+            : null,
+      }
+    );
+
+    if (saved) {
+      sendAccepted(
+        peerId,
+        saved
+      );
+
+      renderLobby();
+      renderPlayers();
+
+      return;
+    }
+
+    if (
+      session.mode ===
+      'locked'
+    ) {
+      dmPeer?.sendToPlayer(
+        peerId,
+        {
+          type:
+            'denied',
+
+          reason:
+            'Session is locked.',
+        }
+      );
+
+      connections.delete(
+        peerId
+      );
+
+      return;
+    }
+
+    if (
+      session.mode ===
+      'open'
+    ) {
+      approve(
+        peerId
+      );
+
+      return;
+    }
+
+    dmPeer?.sendToPlayer(
+      peerId,
+      {
+        type:
+          'pending',
+      }
+    );
+
+    renderLobby();
+  }
+
+  function closeSession() {
+    if (!session) {
+      return;
+    }
+
+    connections.clear();
+
+    dmPeer?.broadcast({
+      type:
+        'closed',
+    });
+
+    const oldPeer =
+      dmPeer;
+
+    dmPeer =
+      null;
+
+    session =
+      null;
+
+    modeSelect.disabled =
+      false;
+
+    sessionButton.textContent =
+      'Open session';
+
+    status.textContent =
+      'closed';
+
+    linkInput.value =
+      '';
+
+    qr.replaceChildren();
+
+    chat.setEnabled(
+      false
+    );
+
+    oldPeer?.destroy();
+
+    renderLobby();
+    renderPlayers();
+
+    log(
+      'session closed'
+    );
+  }
 
   $app.append(
     h(
@@ -4267,16 +2743,7 @@ function viewDM(cid) {
       h(
         'b',
         {},
-        `DM view: ${campaign.name}`
-      ),
-
-      h(
-        'button',
-        {
-          onclick:
-            exportCampaign,
-        },
-        'Export'
+        `DM: ${campaign.name}`
       )
     ),
 
@@ -4301,35 +2768,10 @@ function viewDM(cid) {
 
         modeSelect,
 
-        toggleButton,
+        sessionButton,
 
-        signalingStatus
+        status
       ),
-
-      h(
-        'div',
-        {
-          class:
-            'notice muted',
-        },
-        'No PIN is required in v0.7.1. ' +
-        'Approval mode controls whether new players ' +
-        'need DM approval.'
-      ),
-
-      h(
-        'div',
-        {
-          class:
-            'row',
-        },
-
-        joinLinkInput,
-
-        copyButton
-      ),
-
-      qrEl,
 
       h(
         'div',
@@ -4337,48 +2779,7 @@ function viewDM(cid) {
           class:
             'muted',
         },
-        'The room link stays stable for this campaign. ' +
-        'The DM browser must keep the session open.'
-      )
-    ),
-
-    h(
-      'section',
-      {},
-
-      h(
-        'h2',
-        {},
-        'TURN relay (optional)'
-      ),
-
-      h(
-        'div',
-        {
-          class:
-            'two-col',
-        },
-
-        h(
-          'label',
-          {},
-          'TURN URLs',
-          turnUrls
-        ),
-
-        h(
-          'label',
-          {},
-          'Username',
-          turnUser
-        ),
-
-        h(
-          'label',
-          {},
-          'Credential',
-          turnCred
-        )
+        'No PIN is used. Anyone with the session link can request access. '
       ),
 
       h(
@@ -4387,60 +2788,30 @@ function viewDM(cid) {
           class:
             'row',
         },
+
+        linkInput,
 
         h(
           'button',
           {
             onclick:
-              testTurn,
-          },
-          'Test TURN credentials'
-        ),
+              async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    linkInput.value
+                  );
 
-        turnTestStatus
-      ),
-
-      h(
-        'label',
-        {},
-
-        h(
-          'input',
-          {
-            type:
-              'checkbox',
-
-            onchange:
-              () => {
-                // Stored for next session.
+                  log(
+                    'join link copied'
+                  );
+                } catch {}
               },
-          }
-        ),
-
-        // Replace the generated checkbox child
-        // below with the actual reusable element.
+          },
+          'Copy link'
+        )
       ),
 
-      h(
-        'div',
-        {
-          class:
-            'muted',
-        },
-        'Without TURN, WebRTC can still connect directly. ' +
-        'TURN is required on networks that cannot establish ' +
-        'a direct path.'
-      ),
-
-      h(
-        'div',
-        {
-          class:
-            'muted',
-        },
-        'Warning: when TURN is configured, its credentials ' +
-        'are embedded in the join link so players can use it.'
-      )
+      qr
     ),
 
     h(
@@ -4453,7 +2824,7 @@ function viewDM(cid) {
         'Lobby'
       ),
 
-      lobbyEl
+      lobby
     ),
 
     h(
@@ -4466,7 +2837,7 @@ function viewDM(cid) {
         'Players'
       ),
 
-      playersEl
+      players
     ),
 
     h(
@@ -4496,66 +2867,8 @@ function viewDM(cid) {
     )
   );
 
-  // Replace the placeholder checkbox in the rendered
-  // section with a proper relay-only control.
-  //
-  // This is intentionally done after rendering so
-  // that the same DOM object is used by openSession().
-  const relayContainer =
-    document.querySelector(
-      '.notice'
-    )?.parentElement;
-
-  if (relayContainer) {
-    const checkbox =
-      h(
-        'input',
-        {
-          type:
-            'checkbox',
-        }
-      );
-
-    checkbox.checked =
-      false;
-
-    checkbox.addEventListener(
-      'change',
-      () => {
-        if (
-          session
-        ) {
-          log(
-            'relay-only setting will apply to the next session'
-          );
-        }
-      }
-    );
-
-    // Keep relayCheck synchronized with the visible checkbox.
-    checkbox.addEventListener(
-      'change',
-      () => {
-        relayCheck.checked =
-          checkbox.checked;
-      }
-    );
-
-    const label =
-      h(
-        'label',
-        {},
-        checkbox,
-        ' Relay-only test: force WebRTC through TURN'
-      );
-
-    relayContainer.insertBefore(
-      label,
-      relayContainer.children[
-        relayContainer.children.length - 1
-      ]
-    );
-  }
+  renderLobby();
+  renderPlayers();
 
   cleanup =
     () => {
@@ -4563,24 +2876,25 @@ function viewDM(cid) {
 
       dmPeer =
         null;
+
+      connections.clear();
+
+      activeLog =
+        null;
     };
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // PLAYER
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 function viewPlayer(
-  room,
-  opts = {}
+  roomId
 ) {
   let token =
     sessionStorage.getItem(
       SS_TOKEN
     );
-
-  const newToken =
-    !token;
 
   if (!token) {
     token =
@@ -4592,7 +2906,7 @@ function viewPlayer(
     );
   }
 
-  let peer =
+  let playerPeer =
     null;
 
   let state =
@@ -4604,16 +2918,6 @@ function viewPlayer(
   let wantJoin =
     false;
 
-  let t0 =
-    0;
-
-  let turn =
-    opts.turn ||
-    null;
-
-  const relayOnly =
-    !!opts.relayOnly;
-
   const {
     el: logEl,
     log,
@@ -4621,37 +2925,14 @@ function viewPlayer(
     makeLog(
       'Player',
       () =>
-        peer
-          ? peer.status()
+        playerPeer
+          ? playerPeer.status()
           : log(
-              'not connected yet'
+              'no player peer'
             )
     );
 
-  log(
-    `link: room ${room}; ` +
-    `identity token ${token.slice(0, 6)}… ` +
-    `(${
-      newToken
-        ? 'new for this tab'
-        : 'kept from earlier in this tab'
-    })`
-  );
-
-  if (turn) {
-    log(
-      `link provides TURN: ` +
-      `${turn.urls.join(', ')}`
-    );
-  }
-
-  if (relayOnly) {
-    log(
-      'link requests RELAY-ONLY mode'
-    );
-  }
-
-  const statusEl =
+  const status =
     h(
       'div',
       {
@@ -4661,7 +2942,7 @@ function viewPlayer(
       'Enter your name and join.'
     );
 
-  const infoEl =
+  const info =
     h(
       'div',
       {
@@ -4692,8 +2973,7 @@ function viewPlayer(
       'button',
       {
         onclick:
-          () =>
-            join(),
+          join,
       },
       'Join'
     );
@@ -4703,20 +2983,7 @@ function viewPlayer(
       'button',
       {
         onclick:
-          () => {
-            peer?.destroy();
-
-            peer =
-              null;
-
-            wantJoin =
-              false;
-
-            setState(
-              'idle',
-              'Disconnected.'
-            );
-          },
+          disconnect,
       },
       'Disconnect'
     );
@@ -4726,16 +2993,15 @@ function viewPlayer(
       text => {
         if (
           state ===
-          'accepted'
+            'accepted' &&
+          playerPeer
         ) {
-          peer.send(
-            {
-              t:
-                'chat',
+          playerPeer.sendToDM({
+            type:
+              'chat',
 
-              text,
-            }
-          );
+            text,
+          });
         }
       }
     );
@@ -4760,55 +3026,13 @@ function viewPlayer(
     state =
       next;
 
-    statusEl.textContent =
+    status.textContent =
       text;
 
     chat.setEnabled(
       state ===
         'accepted'
     );
-  }
-
-  function sendJoin() {
-    if (
-      !peer ||
-      !peer.isConnected()
-    ) {
-      return;
-    }
-
-    peer.send(
-      {
-        t:
-          'join',
-
-        token,
-
-        name:
-          nameInput.value.trim() ||
-          'Player',
-      }
-    );
-
-    clearTimeout(
-      joinTimer
-    );
-
-    joinTimer =
-      setTimeout(
-        () => {
-          if (
-            state ===
-            'joining'
-          ) {
-            setState(
-              'joining',
-              'Connected to the DM transport, waiting for a reply…'
-            );
-          }
-        },
-        JOIN_REPLY_TIMEOUT_MS
-      );
   }
 
   function join() {
@@ -4825,311 +3049,298 @@ function viewPlayer(
       name
     );
 
+    wantJoin =
+      true;
+
     nameInput.disabled =
       true;
 
     joinButton.disabled =
       true;
 
-    wantJoin =
-      true;
-
-    t0 =
-      performance.now();
-
-    log(
-      `Join clicked as "${name}"`
-    );
-
     if (
-      peer?.isConnected()
+      playerPeer?.isConnected()
     ) {
-      setState(
-        'joining',
-        'Connected. Asking the DM to let you in…'
+      sendJoin(
+        name
       );
 
-      sendJoin();
-
-      return;
-    }
-
-    if (peer) {
       return;
     }
 
     setState(
       'connecting',
-      'Connecting to the DM…'
+      'Connecting to DM…'
     );
 
-    peer =
+    playerPeer =
       createPlayerPeer(
-        room,
-        {
-          log,
-
-          turn,
-
-          relayOnly,
-
-          onConnect:
-            () => {
-              if (
-                wantJoin
-              ) {
-                setState(
-                  'joining',
-                  'Connected. Asking the DM to let you in…'
-                );
-
-                sendJoin();
-              }
-            },
-
-          onDisconnect:
-            () => {
-              if (
-                state ===
-                  'accepted' ||
-                state ===
-                  'pending'
-              ) {
-                setState(
-                  'connecting',
-                  'Connection to the DM lost. Reconnecting…'
-                );
-              }
-            },
-
-          onReconnecting:
-            (
-              attempt,
-              delay
-            ) => {
-              setState(
-                'connecting',
-                `DM not reachable yet ` +
-                `(retry ${attempt}, ` +
-                `next in ${Math.round(
-                  delay / 1000
-                )}s)…`
-              );
-            },
-
-          onMessage:
-            message =>
-              onPlayerMessage(
-                message
-              ),
-        }
+        roomId
       );
 
-    peer.start();
+    playerPeer.onConnect(
+      () => {
+        if (
+          wantJoin
+        ) {
+          sendJoin(
+            name
+          );
+        }
+      }
+    );
+
+    playerPeer.onDisconnect(
+      () => {
+        if (
+          state ===
+            'accepted' ||
+          state ===
+            'pending'
+        ) {
+          setState(
+            'connecting',
+            'Connection lost. Reconnecting…'
+          );
+        }
+      }
+    );
+
+    playerPeer.onReconnecting(
+      (
+        attempt,
+        delay
+      ) => {
+        if (
+          state ===
+            'connecting'
+        ) {
+          setState(
+            'connecting',
+            `Retry ${attempt} in ${Math.round(delay / 1000)}s…`
+          );
+        }
+      }
+    );
+
+    playerPeer.onMessage(
+      data => {
+        handlePlayerMessage(
+          data
+        );
+      }
+    );
+
+    playerPeer.connect()
+      .catch(
+        error => {
+          log(
+            `initial connection failed: ${error.message}`
+          );
+
+          setState(
+            'connecting',
+            'Could not connect yet. Retrying…'
+          );
+        }
+      );
   }
 
-  function onPlayerMessage(
-    message
+  function sendJoin(
+    name
   ) {
     if (
-      !message ||
-      typeof message !==
-        'object'
+      !playerPeer ||
+      !playerPeer.isConnected()
     ) {
       return;
     }
 
-    switch (
-      message.t
+    playerPeer.sendToDM({
+      type:
+        'join',
+
+      token,
+
+      name,
+    });
+
+    clearTimeout(
+      joinTimer
+    );
+
+    joinTimer =
+      setTimeout(
+        () => {
+          if (
+            state ===
+            'joining'
+          ) {
+            setState(
+              'joining',
+              'Connected. Waiting for DM response…'
+            );
+          }
+        },
+        8000
+      );
+
+    setState(
+      'joining',
+      'Request sent to DM…'
+    );
+  }
+
+  function handlePlayerMessage(
+    data
+  ) {
+    if (!data) {
+      return;
+    }
+
+    if (
+      data.type ===
+      'pending'
     ) {
-      case 'pending':
-        clearTimeout(
-          joinTimer
+      clearTimeout(
+        joinTimer
+      );
+
+      setState(
+        'pending',
+        'Waiting for DM approval…'
+      );
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'accepted'
+    ) {
+      clearTimeout(
+        joinTimer
+      );
+
+      chat.clear();
+
+      (
+        data.history ||
+        []
+      )
+        .forEach(
+          chat.add
         );
 
-        setState(
-          'pending',
-          'Waiting for the DM to approve you…'
+      info.textContent =
+        `Player ${data.num}`;
+
+      setState(
+        'accepted',
+        `Joined "${data.campaignName}" as Player ${data.num} (${data.name})`
+      );
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'denied'
+    ) {
+      setState(
+        'denied',
+        `Not admitted: ${data.reason || 'denied'}`
+      );
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'kicked'
+    ) {
+      setState(
+        'kicked',
+        'You were kicked by the DM.'
+      );
+
+      disconnect();
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'banned'
+    ) {
+      setState(
+        'banned',
+        'You were banned by the DM.'
+      );
+
+      disconnect();
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'closed'
+    ) {
+      setState(
+        'closed',
+        'DM session closed.'
+      );
+
+      return;
+    }
+
+    if (
+      data.type ===
+      'chat'
+    ) {
+      if (
+        data.msg
+      ) {
+        chat.add(
+          data.msg
         );
+      }
 
-        infoEl.textContent =
-          'The DM has received your request.';
+      return;
+    }
 
-        break;
-
-      case 'accepted':
-        clearTimeout(
-          joinTimer
-        );
-
-        chat.clear();
-
-        (
-          message.history ||
-          []
-        )
-          .forEach(
-            chat.add
-          );
-
-        renderPlayerRoster(
-          message.roster
-        );
-
-        log(
-          `ACCEPTED as Player ${message.num}; ` +
-          `received ${
-            (
-              message.history ||
-              []
-            ).length
-          } history message(s); ` +
-          `${Math.round(
-            (
-              performance.now() -
-              t0
-            ) / 1000
-          )} s since Join`
-        );
-
-        setState(
-          'accepted',
-          `Joined "${message.campaignName}" ` +
-          `as Player ${message.num} ` +
-          `(${message.name})`
-        );
-
-        infoEl.textContent =
-          'WebRTC data channel is active.';
-
-        break;
-
-      case 'badpin':
-        // Kept only for compatibility with
-        // older DM versions.
-        setState(
-          'denied',
-          'This DM is using an older PIN-based protocol.'
-        );
-
-        break;
-
-      case 'denied':
-        setState(
-          'denied',
-          `Not admitted: ${
-            message.reason ||
-            'denied'
-          }`
-        );
-
-        stopPeer();
-        unlockForm();
-
-        break;
-
-      case 'kicked':
-        setState(
-          'kicked',
-          'You were kicked by the DM.'
-        );
-
-        stopPeer();
-        unlockForm();
-
-        break;
-
-      case 'banned':
-        setState(
-          'kicked',
-          'You were banned by the DM.'
-        );
-
-        stopPeer();
-        unlockForm();
-
-        break;
-
-      case 'closed':
-        clearTimeout(
-          joinTimer
-        );
-
-        setState(
-          'closed',
-          'The DM closed the session. Reconnecting automatically when it is reopened…'
-        );
-
-        break;
-
-      case 'chat':
-        if (
-          message.msg
-        ) {
-          chat.add(
-            message.msg
-          );
-        }
-
-        break;
-
-      case 'roster':
-        renderPlayerRoster(
-          message.roster
-        );
-
-        break;
-
-      case 'pong':
-        break;
-
-      default:
-        log(
-          `unknown message type "${message.t}"`
-        );
+    if (
+      data.type ===
+      'pong'
+    ) {
+      return;
     }
   }
 
-  function renderPlayerRoster(
-    roster = []
-  ) {
-    infoEl.textContent =
-      'In session: ' +
-      roster
-        .map(
-          player =>
-            `P${player.num} ${player.name}` +
-            (
-              player.online
-                ? ''
-                : ' (offline)'
-            )
-        )
-        .join(', ');
-  }
+  function disconnect() {
+    wantJoin =
+      false;
 
-  function unlockForm() {
+    clearTimeout(
+      joinTimer
+    );
+
+    playerPeer?.destroy();
+
+    playerPeer =
+      null;
+
     nameInput.disabled =
       false;
 
     joinButton.disabled =
       false;
-  }
 
-  function stopPeer() {
-    clearTimeout(
-      joinTimer
+    setState(
+      'idle',
+      'Disconnected.'
     );
-
-    try {
-      peer?.destroy();
-    } catch {}
-
-    peer =
-      null;
-
-    wantJoin =
-      false;
   }
 
   const onVisible =
@@ -5137,24 +3348,20 @@ function viewPlayer(
       if (
         document.visibilityState ===
           'visible' &&
-        peer &&
+        playerPeer &&
         wantJoin
       ) {
-        peer.reconnectNow(
-          'tab visible'
-        );
+        playerPeer.reconnectNow();
       }
     };
 
   const onOnline =
     () => {
       if (
-        peer &&
+        playerPeer &&
         wantJoin
       ) {
-        peer.reconnectNow(
-          'network online'
-        );
+        playerPeer.reconnectNow();
       }
     };
 
@@ -5188,7 +3395,7 @@ function viewPlayer(
       h(
         'b',
         {},
-        `Room: ${room}`
+        `Room: ${roomId}`
       )
     ),
 
@@ -5216,9 +3423,9 @@ function viewPlayer(
         disconnectButton
       ),
 
-      statusEl,
+      status,
 
-      infoEl,
+      info,
 
       h(
         'div',
@@ -5226,7 +3433,7 @@ function viewPlayer(
           class:
             'muted',
         },
-        'No PIN is required.'
+        'No PIN required.'
       )
     ),
 
@@ -5257,11 +3464,6 @@ function viewPlayer(
     )
   );
 
-  setState(
-    'idle',
-    'Enter your name and join.'
-  );
-
   cleanup =
     () => {
       document.removeEventListener(
@@ -5274,26 +3476,37 @@ function viewPlayer(
         onOnline
       );
 
-      stopPeer();
+      playerPeer?.destroy();
+
+      playerPeer =
+        null;
 
       activeLog =
         null;
     };
 }
 
-// ---------------------------------------------------------------------------
-// Start
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Version / startup
+// -----------------------------------------------------------------------------
 
-const versionFooter =
+const version =
   document.getElementById(
     'version'
   );
 
-if (versionFooter) {
-  versionFooter.textContent =
-    `VTTRPG skeleton v${APP_VERSION} · ` +
-    `PeerJS ${PEERJS_VERSION}`;
+if (version) {
+  version.textContent =
+    `VTTRPG skeleton v${APP_VERSION} · PeerJS ${PEERJS_VERSION}`;
 }
+
+window.addEventListener(
+  'beforeunload',
+  () => {
+    try {
+      cleanup?.();
+    } catch {}
+  }
+);
 
 route();
