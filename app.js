@@ -1,563 +1,90 @@
-// VTTRPG skeleton v0.9.0
+// VTTRPG Skeleton v0.10.0
 //
-// PeerJS architecture follows the small, working 5.5e-companion transport:
-//   DM    -> stable peer id "vttrpg-<roomId>"
-//   Player-> random PeerJS id
-//   Player-> peer.connect("vttrpg-<roomId>")
+// Networking intentionally follows 5.5e-companion/js/peer.js:
 //
-// One intentional addition:
-// PeerJS no longer provides its old free TURN relay, so this version gives
-// WebRTC an explicit TURN fallback. Without TURN, an iPhone on cellular and
-// a DM on another network may complete signaling but fail ICE.
+//   DM:
+//     new Peer("vttrpg-" + roomId, config)
 //
-// This file intentionally keeps the networking layer small.
+//   Player:
+//     new Peer(undefined, config)
+//
+//   Player:
+//     peer.connect("vttrpg-" + roomId, { reliable: true })
+//
+// No custom signaling server.
+// No custom WebRTC negotiation.
+// No custom SDP.
+// No custom ICE handling.
+//
+// TURN is optional. Enter working TURN credentials on the DM.
+// The credentials are copied into the join link for the player.
 
-const APP_VERSION = '0.9.0';
+const APP_VERSION = '0.10.0';
 const PEERJS_VERSION = '1.5.5';
 
 const PEER_PREFIX = 'vttrpg-';
 
-const STALE_MS = 60000;
-const STALE_CHECK_MS = 15000;
-const HEARTBEAT_MS = 30000;
+const LS_CAMPAIGNS = 'vttrpg:campaigns';
+const LS_NAME = 'vttrpg:playerName';
+const LS_TURN = 'vttrpg:turn';
 
 const CONNECT_TIMEOUT_MS = 10000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
-const JOIN_REPLY_TIMEOUT_MS = 8000;
+const HEARTBEAT_MS = 30000;
 
-const LS_CAMPAIGNS = 'vttrpg:campaigns';
-const LS_NAME = 'vttrpg:playerName';
-const SS_TOKEN = 'vttrpg:playerToken';
+const app = document.getElementById('app');
+const version = document.getElementById('version');
 
-const DEFAULT_ICE_SERVERS = [
-  {
-    urls: 'stun:stun.l.google.com:19302',
-  },
+version.textContent =
+  `VTTRPG skeleton v${APP_VERSION} · PeerJS ${PEERJS_VERSION}`;
 
-  {
-    urls: 'stun:openrelay.metered.ca:80',
-  },
-
-  {
-    urls: 'turn:openrelay.metered.ca:80',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-
-  {
-    urls: 'turn:openrelay.metered.ca:443',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-
-  {
-    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-    username: 'openrelayproject',
-    credential: 'openrelayproject',
-  },
-];
-
-const PEER_SERVER_CONFIG = {
-  config: {
-    iceServers: DEFAULT_ICE_SERVERS,
-    sdpSemantics: 'unified-plan',
-  },
-
-  debug: 2,
-};
-
+let cleanup = null;
 let activeLog = null;
 
-const safeStr = value => {
-  try {
-    return typeof value === 'string'
-      ? value
-      : (
-          value?.message ||
-          JSON.stringify(value)
-        );
-  } catch {
-    return String(value);
-  }
-};
-
-for (const level of ['warn', 'error']) {
-  const original =
-    console[level].bind(console);
-
-  console[level] = (...args) => {
-    original(...args);
-
-    try {
-      activeLog?.(
-        `console.${level}: ` +
-        args
-          .map(safeStr)
-          .join(' ')
-          .slice(0, 500)
-      );
-    } catch {
-      // ignore logger failures
-    }
-  };
-}
-
-window.addEventListener(
-  'error',
-  event => {
-    activeLog?.(
-      `window error: ${event.message}`
-    );
-  }
-);
-
-window.addEventListener(
-  'unhandledrejection',
-  event => {
-    activeLog?.(
-      `unhandled rejection: ${safeStr(event.reason)}`
-    );
-  }
-);
-
-window.addEventListener(
-  'online',
-  () => {
-    activeLog?.(
-      'browser went ONLINE'
-    );
-  }
-);
-
-window.addEventListener(
-  'offline',
-  () => {
-    activeLog?.(
-      'browser went OFFLINE'
-    );
-  }
-);
-
-document.addEventListener(
-  'visibilitychange',
-  () => {
-    activeLog?.(
-      'tab is now ' +
-      document.visibilityState
-    );
-  }
-);
-
 // -----------------------------------------------------------------------------
-// WebRTC diagnostics
+// Helpers
 // -----------------------------------------------------------------------------
 
-if (
-  window.RTCPeerConnection &&
-  !window.__vttrpgPcPatched
-) {
-  window.__vttrpgPcPatched = true;
+function rid(length = 12) {
+  const chars =
+    'abcdefghijklmnopqrstuvwxyz0123456789';
 
-  const NativePC =
-    window.RTCPeerConnection;
+  const bytes =
+    new Uint8Array(length);
 
-  let pcCount = 0;
+  crypto.getRandomValues(bytes);
 
-  window.RTCPeerConnection =
-    class extends NativePC {
-      constructor(config, ...rest) {
-        super(config, ...rest);
-
-        const id =
-          ++pcCount;
-
-        const logRtc =
-          message =>
-            activeLog?.(
-              `rtc#${id}: ${message}`
-            );
-
-        const serverKinds = {};
-
-        for (
-          const server
-          of config?.iceServers || []
-        ) {
-          const urls =
-            []
-              .concat(
-                server.urls ||
-                server.url ||
-                []
-              );
-
-          for (
-            const url
-            of urls
-          ) {
-            const kind =
-              String(url)
-                .split(':')[0];
-
-            serverKinds[kind] =
-              (
-                serverKinds[kind] ||
-                0
-              ) + 1;
-          }
-        }
-
-        logRtc(
-          `new connection; ICE servers: ` +
-          JSON.stringify(
-            serverKinds
-          )
-        );
-
-        const localCandidates = {};
-        const remoteCandidates = {};
-
-        const candidateType =
-          value =>
-            /\btyp\s+(\w+)/.exec(
-              value || ''
-            )?.[1];
-
-        const stats =
-          async label => {
-            try {
-              const report =
-                await this.getStats();
-
-              const pairs = [];
-
-              report.forEach(
-                item => {
-                  if (
-                    item.type !==
-                    'candidate-pair'
-                  ) {
-                    return;
-                  }
-
-                  const local =
-                    report.get(
-                      item.localCandidateId
-                    );
-
-                  const remote =
-                    report.get(
-                      item.remoteCandidateId
-                    );
-
-                  pairs.push({
-                    state:
-                      item.state,
-
-                    nominated:
-                      !!item.nominated,
-
-                    selected:
-                      !!item.selected,
-
-                    local:
-                      local?.candidateType ||
-                      '?',
-
-                    remote:
-                      remote?.candidateType ||
-                      '?',
-
-                    requests:
-                      item.requestsSent ||
-                      0,
-
-                    responses:
-                      item.responsesReceived ||
-                      0,
-                  });
-                }
-              );
-
-              logRtc(
-                `${label}: ` +
-                JSON.stringify({
-                  ice:
-                    this.iceConnectionState,
-
-                  connection:
-                    this.connectionState,
-
-                  gathering:
-                    this.iceGatheringState,
-
-                  pairs,
-
-                  localCandidates,
-
-                  remoteCandidates,
-                })
-              );
-            } catch (
-              error
-            ) {
-              logRtc(
-                `stats failed: ${error.message}`
-              );
-            }
-          };
-
-        this.addEventListener(
-          'icecandidate',
-          event => {
-            if (
-              event.candidate
-            ) {
-              const type =
-                candidateType(
-                  event.candidate
-                    .candidate
-                ) ||
-                '?';
-
-              const key =
-                `${type}/${
-                  event.candidate.protocol ||
-                  '?'
-                }`;
-
-              localCandidates[key] =
-                (
-                  localCandidates[key] ||
-                  0
-                ) + 1;
-            } else {
-              logRtc(
-                `ICE gathering finished: ` +
-                JSON.stringify(
-                  localCandidates
-                )
-              );
-            }
-          }
-        );
-
-        this.addEventListener(
-          'icecandidateerror',
-          event => {
-            logRtc(
-              `ICE candidate error ` +
-              `${event.errorCode || ''} ` +
-              `${event.url || ''} ` +
-              `${event.errorText || ''}`
-            );
-          }
-        );
-
-        this.addEventListener(
-          'iceconnectionstatechange',
-          () => {
-            logRtc(
-              `ice=${this.iceConnectionState}`
-            );
-
-            if (
-              this.iceConnectionState ===
-              'checking'
-            ) {
-              setTimeout(
-                () => {
-                  if (
-                    this.iceConnectionState ===
-                    'checking'
-                  ) {
-                    stats(
-                      'ICE still checking'
-                    );
-                  }
-                },
-                3000
-              );
-
-              setTimeout(
-                () => {
-                  if (
-                    this.iceConnectionState ===
-                    'checking'
-                  ) {
-                    stats(
-                      'ICE still checking after 8s'
-                    );
-                  }
-                },
-                8000
-              );
-            }
-          }
-        );
-
-        this.addEventListener(
-          'connectionstatechange',
-          () => {
-            logRtc(
-              `conn=${this.connectionState}`
-            );
-
-            if (
-              this.connectionState ===
-              'connected'
-            ) {
-              setTimeout(
-                () =>
-                  stats(
-                    'CONNECTED'
-                  ),
-                500
-              );
-            }
-
-            if (
-              this.connectionState ===
-              'failed'
-            ) {
-              stats(
-                'FAILED'
-              );
-            }
-          }
-        );
-
-        const originalSRD =
-          this.setRemoteDescription.bind(
-            this
-          );
-
-        this.setRemoteDescription =
-          description => {
-            (
-              description?.sdp ||
-              ''
-            )
-              .split('\n')
-              .filter(
-                line =>
-                  line.startsWith(
-                    'a=candidate'
-                  )
-              )
-              .forEach(
-                line => {
-                  const type =
-                    candidateType(
-                      line
-                    );
-
-                  if (type) {
-                    remoteCandidates[type] =
-                      (
-                        remoteCandidates[type] ||
-                        0
-                      ) + 1;
-                  }
-                }
-              );
-
-            logRtc(
-              `remote ${description?.type} set; ` +
-              `remote candidates=` +
-              JSON.stringify(
-                remoteCandidates
-              )
-            );
-
-            return originalSRD(
-              description
-            );
-          };
-      }
-    };
+  return [...bytes]
+    .map(x => chars[x % chars.length])
+    .join('');
 }
 
-const footer =
-  document.getElementById(
-    'version'
-  );
-
-if (footer) {
-  footer.textContent =
-    `VTTRPG skeleton v${APP_VERSION} · ` +
-    `PeerJS ${PEERJS_VERSION}`;
+function short(id) {
+  return String(id || '').slice(0, 8);
 }
 
-const short =
-  id =>
-    String(id || '')
-      .slice(0, 8);
+function h(tag, props = {}, ...children) {
+  const el =
+    document.createElement(tag);
 
-const rid =
-  (length = 12) => {
-    const chars =
-      'abcdefghijklmnopqrstuvwxyz0123456789';
-
-    const bytes =
-      new Uint8Array(length);
-
-    crypto.getRandomValues(
-      bytes
-    );
-
-    return [...bytes]
-      .map(
-        byte =>
-          chars[
-            byte % chars.length
-          ]
-      )
-      .join('');
-  };
-
-function h(
-  tag,
-  props = {},
-  ...kids
-) {
-  const element =
-    document.createElement(
-      tag
-    );
-
-  for (
-    const [
-      key,
-      value,
-    ]
-    of Object.entries(props)
-  ) {
-    if (
-      key.startsWith('on')
-    ) {
-      element.addEventListener(
+  for (const [key, value] of Object.entries(props)) {
+    if (key.startsWith('on')) {
+      el.addEventListener(
         key.slice(2),
         value
       );
-    } else if (
-      key === 'class'
-    ) {
-      element.className =
-        value;
+    } else if (key === 'class') {
+      el.className = value;
     } else {
-      element.setAttribute(
+      el.setAttribute(
         key,
         value
       );
     }
   }
 
-  for (
-    const child
-    of kids.flat()
-  ) {
+  for (const child of children.flat()) {
     if (
       child === null ||
       child === undefined ||
@@ -566,30 +93,296 @@ function h(
       continue;
     }
 
-    element.append(
+    el.append(
       child instanceof Node
         ? child
         : String(child)
     );
   }
 
-  return element;
+  return el;
+}
+
+function safe(value) {
+  try {
+    return typeof value === 'string'
+      ? value
+      : value?.message ||
+          JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 // -----------------------------------------------------------------------------
-// PeerJS transport
+// Logging
 // -----------------------------------------------------------------------------
 
-function createDMPeer(
-  roomId,
-  {
+function makeLog(role, onStatus) {
+  const pre =
+    h('pre', {
+      class: 'log',
+    });
+
+  const log = text => {
+    const line =
+      `${new Date().toISOString().slice(11, 23)}  ${text}\n`;
+
+    pre.textContent += line;
+    pre.scrollTop = pre.scrollHeight;
+
+    console.log(
+      `[VTTRPG ${role}]`,
+      text
+    );
+  };
+
+  activeLog = log;
+
+  log(
+    `VTTRPG v${APP_VERSION} ${role} view started; page ${location.pathname}`
+  );
+
+  log(
+    `env: online=${navigator.onLine} ` +
+    `secureContext=${isSecureContext} ` +
+    `RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'} ` +
+    `PeerJS=${window.Peer ? 'loaded' : 'MISSING'}`
+  );
+
+  log(
+    `browser: ${navigator.userAgent}`
+  );
+
+  const toolbar =
+    h(
+      'div',
+      { class: 'row' },
+
+      onStatus
+        ? h(
+            'button',
+            {
+              onclick: onStatus,
+            },
+            'Log status now'
+          )
+        : null,
+
+      h(
+        'button',
+        {
+          onclick: async () => {
+            try {
+              await navigator.clipboard.writeText(
+                pre.textContent
+              );
+
+              log(
+                'log copied'
+              );
+            } catch (error) {
+              log(
+                `copy failed: ${error.message}`
+              );
+            }
+          },
+        },
+        'Copy log'
+      ),
+
+      h(
+        'button',
+        {
+          onclick: () => {
+            pre.textContent = '';
+          },
+        },
+        'Clear'
+      )
+    );
+
+  return {
+    el: h(
+      'div',
+      {},
+      toolbar,
+      pre
+    ),
     log,
-    onPlayerConnect,
-    onPlayerDisconnect,
-    onMessage,
-    onSignaling,
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Base64 for TURN data in join URL
+// -----------------------------------------------------------------------------
+
+function encode(data) {
+  const bytes =
+    new TextEncoder().encode(
+      JSON.stringify(data)
+    );
+
+  let binary = '';
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
   }
-) {
+
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+function decode(text) {
+  const normalized =
+    text
+      .replace(/-/g, '+')
+      .replace(/_/g, '/');
+
+  const binary =
+    atob(
+      normalized +
+      '='.repeat(
+        (4 - normalized.length % 4) % 4
+      )
+    );
+
+  const bytes =
+    Uint8Array.from(
+      binary,
+      x => x.charCodeAt(0)
+    );
+
+  return JSON.parse(
+    new TextDecoder().decode(bytes)
+  );
+}
+
+function parseTurnFromQuery(query) {
+  const params =
+    new URLSearchParams(query);
+
+  const value =
+    params.get('turn');
+
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const turn =
+      decode(value);
+
+    if (
+      !Array.isArray(turn.urls) ||
+      !turn.urls.length ||
+      !turn.username ||
+      !turn.credential
+    ) {
+      return null;
+    }
+
+    return turn;
+  } catch {
+    return null;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// TURN
+// -----------------------------------------------------------------------------
+
+function loadTurn() {
+  try {
+    return (
+      JSON.parse(
+        localStorage.getItem(
+          LS_TURN
+        )
+      ) || {
+        urls: '',
+        username: '',
+        credential: '',
+      }
+    );
+  } catch {
+    return {
+      urls: '',
+      username: '',
+      credential: '',
+    };
+  }
+}
+
+function saveTurn(turn) {
+  localStorage.setItem(
+    LS_TURN,
+    JSON.stringify(turn)
+  );
+}
+
+function turnConfig(turn) {
+  if (!turn) {
+    return null;
+  }
+
+  const urls =
+    Array.isArray(turn.urls)
+      ? turn.urls
+      : String(turn.urls || '')
+          .split(',')
+          .map(x => x.trim())
+          .filter(Boolean);
+
+  if (
+    !urls.length ||
+    !turn.username ||
+    !turn.credential
+  ) {
+    return null;
+  }
+
+  return {
+    urls,
+    username:
+      turn.username,
+    credential:
+      turn.credential,
+  };
+}
+
+function peerConfig(turn) {
+  const config = {};
+
+  const validTurn =
+    turnConfig(turn);
+
+  if (validTurn) {
+    config.config = {
+      iceServers: [
+        {
+          urls:
+            'stun:stun.l.google.com:19302',
+        },
+
+        validTurn,
+      ],
+
+      sdpSemantics:
+        'unified-plan',
+    };
+  }
+
+  return config;
+}
+
+// -----------------------------------------------------------------------------
+// Peer layer
+// -----------------------------------------------------------------------------
+
+function createDMPeer(roomId, options) {
   const peerId =
     PEER_PREFIX + roomId;
 
@@ -598,10 +391,7 @@ function createDMPeer(
 
   let peer = null;
   let destroyed = false;
-  let opened = false;
   let staleTimer = null;
-  let reconnectTimer = null;
-  let reconnectAttempt = 0;
 
   function init() {
     return new Promise(
@@ -620,83 +410,33 @@ function createDMPeer(
     reject,
     attempt
   ) {
-    if (destroyed) {
-      reject(
-        new Error(
-          'DM peer destroyed'
-        )
-      );
-
-      return;
-    }
-
-    opened =
-      false;
-
-    log(
-      `registering ${peerId} at the PeerJS cloud ` +
-      `(attempt ${attempt + 1})…`
-    );
-
-    // Stable DM ID. This is the important reference-repo pattern.
     peer =
       new window.Peer(
         peerId,
-        PEER_SERVER_CONFIG
+        peerConfig(options.turn)
       );
+
+    options.log(
+      `registering ${peerId} at PeerJS…`
+    );
 
     peer.on(
       'open',
       id => {
-        if (
-          opened
-        ) {
-          reconnectAttempt =
-            0;
-
-          if (
-            reconnectTimer
-          ) {
-            clearTimeout(
-              reconnectTimer
-            );
-
-            reconnectTimer =
-              null;
-          }
-
-          onSignaling?.(
-            'connected'
-          );
-
-          log(
-            `signaling re-established as ${id}`
-          );
-
-          return;
-        }
-
-        opened =
-          true;
-
-        reconnectAttempt =
-          0;
-
-        log(
+        options.log(
           `PeerJS signaling connected as ${id}`
         );
 
-        resolve(
-          id
-        );
+        attachPeerEvents();
+        resolve(id);
       }
     );
 
     peer.on(
       'connection',
-      conn => {
-        handleIncoming(
-          conn
+      connection => {
+        handleConnection(
+          connection
         );
       }
     );
@@ -704,90 +444,86 @@ function createDMPeer(
     peer.on(
       'disconnected',
       () => {
-        if (
-          destroyed
-        ) {
+        if (destroyed) {
           return;
         }
 
-        log(
-          'DM lost PeerJS signaling connection'
+        options.log(
+          'DM signaling disconnected; reconnecting…'
         );
 
-        onSignaling?.(
+        options.onSignaling?.(
           'reconnecting'
         );
 
-        scheduleReconnect();
+        setTimeout(
+          () => {
+            if (
+              !destroyed &&
+              peer &&
+              !peer.destroyed
+            ) {
+              try {
+                peer.reconnect();
+              } catch (error) {
+                options.log(
+                  `reconnect failed: ${error.message}`
+                );
+              }
+            }
+          },
+          1000
+        );
       }
     );
 
     peer.on(
       'error',
       error => {
-        if (
-          destroyed
-        ) {
+        if (destroyed) {
           return;
         }
 
-        log(
-          `PeerJS error ` +
-          `(${error?.type || 'unknown'}): ` +
-          `${safeStr(error)}`
+        options.log(
+          `PeerJS error (${error?.type || 'unknown'}): ${safe(error)}`
         );
 
         if (
-          !opened
+          error?.type === 'unavailable-id' &&
+          attempt < 3
         ) {
-          if (
-            error?.type ===
-              'unavailable-id' &&
-            attempt < 3
-          ) {
-            const delay =
-              2000 *
-              (attempt + 1);
+          const delay =
+            2000 *
+            (attempt + 1);
 
-            log(
-              `stable ID still held; ` +
-              `retrying in ${delay}ms`
-            );
+          options.log(
+            `stable ID still held; retrying in ${delay}ms`
+          );
 
-            try {
-              peer.destroy();
-            } catch {}
+          try {
+            peer.destroy();
+          } catch {}
 
-            setTimeout(
-              () => {
-                if (
-                  !destroyed
-                ) {
-                  tryInit(
-                    resolve,
-                    reject,
-                    attempt + 1
-                  );
-                }
-              },
-              delay
-            );
-
-            return;
-          }
-
+          setTimeout(
+            () => {
+              if (!destroyed) {
+                tryInit(
+                  resolve,
+                  reject,
+                  attempt + 1
+                );
+              }
+            },
+            delay
+          );
+        } else if (
+          !peer.open
+        ) {
           reject(
             new Error(
-              error?.type ===
-                'unavailable-id'
-                ? 'Session ID is still held by another browser.'
-                : (
-                  'PeerJS error: ' +
-                  (
-                    error?.type ||
-                    safeStr(error)
-                  )
-                )
+              error?.type ||
+              error?.message ||
+              String(error)
             )
           );
         }
@@ -795,97 +531,50 @@ function createDMPeer(
     );
   }
 
-  function scheduleReconnect() {
-    if (
-      destroyed ||
-      reconnectTimer
-    ) {
-      return;
-    }
-
-    const delay =
-      Math.min(
-        RECONNECT_BASE_MS *
-          (
-            2 **
-            reconnectAttempt
-          ),
-        RECONNECT_MAX_MS
-      );
-
-    reconnectAttempt++;
-
-    log(
-      `DM signaling reconnect in ${delay}ms ` +
-      `(attempt ${reconnectAttempt})`
+  function attachPeerEvents() {
+    peer.on(
+      'open',
+      () => {
+        options.onSignaling?.(
+          'connected'
+        );
+      }
     );
-
-    reconnectTimer =
-      setTimeout(
-        () => {
-          reconnectTimer =
-            null;
-
-          if (
-            destroyed ||
-            !peer ||
-            peer.destroyed
-          ) {
-            return;
-          }
-
-          try {
-            peer.reconnect();
-          } catch (
-            error
-          ) {
-            log(
-              `PeerJS reconnect failed: ` +
-              `${error.message}`
-            );
-          }
-        },
-        delay
-      );
   }
 
-  function handleIncoming(
-    conn
-  ) {
+  function handleConnection(connection) {
     const pid =
-      conn.peer;
+      connection.peer;
 
-    log(
-      `incoming connection from ` +
-      `${short(pid)} (negotiating…)`
+    options.log(
+      `incoming connection from ${short(pid)}…`
     );
 
-    conn.on(
+    connection.on(
       'open',
       () => {
         connections.set(
           pid,
           {
-            conn,
+            connection,
             lastActivity:
               Date.now(),
           }
         );
 
-        log(
-          `data channel open: ` +
-          `${short(pid)}`
+        options.log(
+          `data channel open from ${short(pid)}`
         );
 
-        ensureStaleCheck();
-
-        onPlayerConnect?.(
+        options.onPlayerConnect?.(
           pid
         );
+
+        startStaleCheck();
       }
     );
 
-    conn.on(
+    connection.on(
       'data',
       data => {
         const entry =
@@ -893,106 +582,72 @@ function createDMPeer(
             pid
           );
 
-        if (
-          entry &&
-          entry.conn ===
-            conn
-        ) {
+        if (entry) {
           entry.lastActivity =
             Date.now();
         }
 
         if (
-          data?.t ===
-          'ping'
+          data?.type === 'ping'
         ) {
           try {
-            conn.send({
-              t:
+            connection.send({
+              type:
                 'pong',
-
               ts:
                 data.ts,
             });
           } catch {}
-
-          return;
         }
 
-        log(
-          `← ${short(pid)} ` +
-          `${data?.t ?? typeof data}`
-        );
-
-        onMessage?.(
-          data,
-          pid
+        options.onMessage?.(
+          pid,
+          data
         );
       }
     );
 
-    conn.on(
+    connection.on(
       'close',
       () => {
-        const entry =
-          connections.get(
-            pid
-          );
-
-        if (
-          !entry ||
-          entry.conn !==
-            conn
-        ) {
-          return;
-        }
-
         connections.delete(
           pid
         );
 
-        log(
-          `player ${short(pid)} gone`
+        options.log(
+          `player ${short(pid)} disconnected`
         );
 
-        onPlayerDisconnect?.(
+        options.onPlayerDisconnect?.(
           pid
         );
       }
     );
 
-    conn.on(
+    connection.on(
       'error',
       error => {
-        log(
-          `connection error ` +
-          `${short(pid)}: ` +
-          `${safeStr(error)}`
+        options.log(
+          `connection error ${short(pid)}: ${safe(error)}`
         );
       }
     );
   }
 
-  function ensureStaleCheck() {
-    if (
-      staleTimer
-    ) {
+  function startStaleCheck() {
+    if (staleTimer) {
       return;
     }
 
     staleTimer =
       setInterval(
         () => {
-          if (
-            destroyed
-          ) {
+          if (destroyed) {
             clearInterval(
               staleTimer
             );
 
-            staleTimer =
-              null;
-
+            staleTimer = null;
             return;
           }
 
@@ -1009,153 +664,118 @@ function createDMPeer(
             if (
               time -
                 entry.lastActivity >
-              STALE_MS
+              STALE_CONNECTION_TIMEOUT
             ) {
-              log(
-                `stale player ${short(pid)}`
-              );
+              try {
+                entry.connection.close();
+              } catch {}
 
               connections.delete(
                 pid
               );
 
-              try {
-                entry.conn.close();
-              } catch {}
-
-              onPlayerDisconnect?.(
+              options.onPlayerDisconnect?.(
                 pid
               );
             }
           }
 
           if (
-            !connections.size
+            connections.size === 0
           ) {
             clearInterval(
               staleTimer
             );
 
-            staleTimer =
-              null;
+            staleTimer = null;
           }
         },
-        STALE_CHECK_MS
+        STALE_CHECK_INTERVAL
       );
+  }
+
+  function send(
+    data,
+    target
+  ) {
+    if (target) {
+      const entry =
+        connections.get(
+          target
+        );
+
+      if (
+        entry?.connection?.open
+      ) {
+        entry.connection.send(
+          data
+        );
+      }
+
+      return;
+    }
+
+    for (
+      const entry
+      of connections.values()
+    ) {
+      if (
+        entry.connection?.open
+      ) {
+        try {
+          entry.connection.send(
+            data
+          );
+        } catch {}
+      }
+    }
   }
 
   return {
     init,
 
-    send(
-      data,
-      target
-    ) {
-      const list =
-        target
-          ? [
-              [
-                target,
-                connections.get(
-                  target
-                ),
-              ],
-            ]
-          : [
-              ...connections.entries(),
-            ];
+    send,
 
-      for (
-        const [
-          pid,
-          entry,
-        ]
-        of list
-      ) {
-        if (
-          !entry?.conn?.open
-        ) {
-          continue;
-        }
-
-        try {
-          entry.conn.send(
-            data
-          );
-
-          log(
-            `→ ${short(pid)} ` +
-            `${data?.t ?? typeof data}`
-          );
-        } catch (
-          error
-        ) {
-          log(
-            `send failed: ${error.message}`
-          );
-        }
-      }
-    },
-
-    close(
-      pid
-    ) {
+    close(peerId) {
       const entry =
         connections.get(
-          pid
+          peerId
         );
 
       if (!entry) {
         return;
       }
 
-      connections.delete(
-        pid
-      );
-
       try {
-        entry.conn.close();
+        entry.connection.close();
       } catch {}
+
+      connections.delete(
+        peerId
+      );
     },
 
     status() {
-      log(
+      options.log(
         `DM peer ${peerId}: ` +
         `signaling=${
           peer?.disconnected
             ? 'DISCONNECTED'
-            : peer?.destroyed
-              ? 'destroyed'
-              : 'connected'
-        } ` +
+            : 'connected'
+        }, ` +
         `players=${connections.size}`
       );
     },
 
     destroy() {
-      destroyed =
-        true;
+      destroyed = true;
 
-      if (
-        staleTimer
-      ) {
+      if (staleTimer) {
         clearInterval(
           staleTimer
         );
 
-        staleTimer =
-          null;
-      }
-
-      if (
-        reconnectTimer
-      ) {
-        clearTimeout(
-          reconnectTimer
-        );
-
-        reconnectTimer =
-          null;
+        staleTimer = null;
       }
 
       for (
@@ -1163,7 +783,7 @@ function createDMPeer(
         of connections.values()
       ) {
         try {
-          entry.conn.close();
+          entry.connection.close();
         } catch {}
       }
 
@@ -1173,43 +793,37 @@ function createDMPeer(
         peer?.destroy();
       } catch {}
 
-      peer =
-        null;
+      peer = null;
     },
   };
 }
 
 function createPlayerPeer(
   roomId,
-  {
-    log,
-    onConnect,
-    onDisconnect,
-    onReconnecting,
-    onMessage,
-  }
+  turn,
+  options
 ) {
   const hostId =
     PEER_PREFIX + roomId;
 
   let peer = null;
-  let conn = null;
+  let connection = null;
 
   let destroyed = false;
   let reconnectTimer = null;
   let attemptTimer = null;
-  let heartbeatTimer = null;
   let reconnectAttempt = 0;
-  let connectAttempt = 0;
+  let heartbeatTimer = null;
 
   function start() {
-    destroyed =
-      false;
-
     createPeer();
   }
 
   function createPeer() {
+    if (destroyed) {
+      return;
+    }
+
     if (
       peer &&
       !peer.destroyed
@@ -1217,43 +831,37 @@ function createPlayerPeer(
       return;
     }
 
-    log(
-      'registering player at the PeerJS cloud…'
-    );
-
-    // Random player ID, exactly like the reference layer.
     peer =
       new window.Peer(
         undefined,
-        PEER_SERVER_CONFIG
+        peerConfig(turn)
       );
+
+    options.log(
+      'registering player at PeerJS…'
+    );
 
     peer.on(
       'open',
       id => {
-        reconnectAttempt =
-          0;
-
-        log(
-          `PeerJS signaling connected as ${id}`
+        options.log(
+          `Player PeerJS signaling connected as ${id}`
         );
 
-        openConnection();
+        reconnectAttempt = 0;
+        connect();
       }
     );
 
     peer.on(
       'disconnected',
       () => {
-        if (
-          destroyed
-        ) {
+        if (destroyed) {
           return;
         }
 
-        log(
-          'player lost PeerJS signaling; ' +
-          'reconnecting…'
+        options.log(
+          'Player signaling disconnected'
         );
 
         setTimeout(
@@ -1266,14 +874,7 @@ function createPlayerPeer(
             ) {
               try {
                 peer.reconnect();
-              } catch (
-                error
-              ) {
-                log(
-                  `peer.reconnect failed: ` +
-                  `${error.message}`
-                );
-              }
+              } catch {}
             }
           },
           1000
@@ -1284,16 +885,8 @@ function createPlayerPeer(
     peer.on(
       'error',
       error => {
-        if (
-          destroyed
-        ) {
-          return;
-        }
-
-        log(
-          `PeerJS player error ` +
-          `(${error?.type || 'unknown'}): ` +
-          `${safeStr(error)}`
+        options.log(
+          `Player PeerJS error (${error?.type || 'unknown'}): ${safe(error)}`
         );
 
         scheduleReconnect();
@@ -1301,7 +894,7 @@ function createPlayerPeer(
     );
   }
 
-  function openConnection() {
+  function connect() {
     if (
       destroyed ||
       !peer ||
@@ -1310,39 +903,27 @@ function createPlayerPeer(
       return;
     }
 
-    if (
-      conn
-    ) {
+    if (connection) {
       try {
-        conn.close();
+        connection.close();
       } catch {}
 
-      conn =
-        null;
+      connection = null;
     }
 
-    const attempt =
-      ++connectAttempt;
-
-    log(
-      `connecting to DM ${hostId} ` +
-      `(attempt ${attempt})…`
+    options.log(
+      `connecting to DM ${hostId}…`
     );
 
-    const c =
+    connection =
       peer.connect(
         hostId,
         {
-          reliable:
-            true,
+          reliable: true,
         }
       );
 
-    conn =
-      c;
-
-    let opened =
-      false;
+    let opened = false;
 
     clearTimeout(
       attemptTimer
@@ -1353,18 +934,17 @@ function createPlayerPeer(
         () => {
           if (
             opened ||
-            destroyed ||
-            conn !== c
+            destroyed
           ) {
             return;
           }
 
-          log(
-            `attempt ${attempt} timed out`
+          options.log(
+            'connection to DM timed out'
           );
 
           try {
-            c.close();
+            connection.close();
           } catch {}
 
           scheduleReconnect();
@@ -1372,121 +952,94 @@ function createPlayerPeer(
         CONNECT_TIMEOUT_MS
       );
 
-    c.on(
-      'iceStateChanged',
-      state => {
-        log(
-          `PeerJS ICE state: ${state}`
-        );
-      }
-    );
-
-    c.on(
+    connection.on(
       'open',
       () => {
-        opened =
-          true;
+        opened = true;
 
         clearTimeout(
           attemptTimer
         );
 
-        reconnectAttempt =
-          0;
+        reconnectAttempt = 0;
 
-        log(
-          `data channel to DM OPEN ` +
-          `(attempt ${attempt})`
+        options.log(
+          'data channel to DM OPEN'
         );
 
         startHeartbeat();
 
-        onConnect?.();
+        options.onConnect?.();
       }
     );
 
-    c.on(
+    connection.on(
       'data',
       data => {
         if (
-          data?.t ===
-          'pong'
+          data?.type === 'pong'
         ) {
           return;
         }
 
-        log(
-          `← DM ${data?.t ?? typeof data}`
-        );
-
-        onMessage?.(
+        options.onMessage?.(
           data
         );
       }
     );
 
-    c.on(
+    connection.on(
       'close',
       () => {
         clearTimeout(
           attemptTimer
         );
 
-        if (
-          conn !== c ||
-          destroyed
-        ) {
-          return;
-        }
-
         stopHeartbeat();
 
-        conn =
-          null;
-
-        log(
-          'data channel to DM closed'
-        );
-
         if (
-          opened
+          !destroyed
         ) {
-          onDisconnect?.();
-        }
+          options.log(
+            'data channel closed'
+          );
 
-        scheduleReconnect();
+          options.onDisconnect?.();
+
+          scheduleReconnect();
+        }
       }
     );
 
-    c.on(
+    connection.on(
       'error',
       error => {
         clearTimeout(
           attemptTimer
         );
 
-        if (
-          conn !== c ||
-          destroyed
-        ) {
-          return;
-        }
-
         stopHeartbeat();
 
-        log(
-          `connection error: ` +
-          `${error?.type || ''} ` +
-          `${safeStr(error)}`
-        );
-
         if (
-          opened
+          !destroyed
         ) {
-          onDisconnect?.();
-        }
+          options.log(
+            `connection error: ${safe(error)}`
+          );
 
-        scheduleReconnect();
+          options.onDisconnect?.();
+
+          scheduleReconnect();
+        }
+      }
+    );
+
+    connection.on(
+      'iceStateChanged',
+      state => {
+        options.log(
+          `ICE state: ${state}`
+        );
       }
     );
   }
@@ -1502,21 +1055,17 @@ function createPlayerPeer(
     const delay =
       Math.min(
         RECONNECT_BASE_MS *
-          (
-            2 **
-            reconnectAttempt
-          ),
+          2 ** reconnectAttempt,
         RECONNECT_MAX_MS
       );
 
     reconnectAttempt++;
 
-    log(
-      `player retry ${reconnectAttempt} ` +
-      `in ${delay}ms`
+    options.log(
+      `reconnect ${reconnectAttempt} in ${delay}ms`
     );
 
-    onReconnecting?.(
+    options.onReconnecting?.(
       reconnectAttempt,
       delay
     );
@@ -1524,8 +1073,7 @@ function createPlayerPeer(
     reconnectTimer =
       setTimeout(
         () => {
-          reconnectTimer =
-            null;
+          reconnectTimer = null;
 
           if (
             destroyed
@@ -1534,68 +1082,16 @@ function createPlayerPeer(
           }
 
           if (
-            !peer ||
-            peer.destroyed
+            peer?.destroyed ||
+            !peer
           ) {
             createPeer();
-            return;
-          }
-
-          if (
-            peer.disconnected
-          ) {
-            try {
-              peer.reconnect();
-            } catch {}
           } else {
-            openConnection();
+            connect();
           }
         },
         delay
       );
-  }
-
-  function cancelReconnect() {
-    if (
-      reconnectTimer
-    ) {
-      clearTimeout(
-        reconnectTimer
-      );
-
-      reconnectTimer =
-        null;
-    }
-
-    reconnectAttempt =
-      0;
-  }
-
-  function reconnectNow(
-    why = 'manual'
-  ) {
-    if (
-      destroyed ||
-      conn?.open
-    ) {
-      return;
-    }
-
-    log(
-      `reconnect now: ${why}`
-    );
-
-    cancelReconnect();
-
-    if (
-      peer?.disconnected
-    ) {
-      try {
-        peer.reconnect();
-      } catch {}
-    } else {
-      openConnection();
-    }
   }
 
   function startHeartbeat() {
@@ -1605,13 +1101,12 @@ function createPlayerPeer(
       setInterval(
         () => {
           if (
-            conn?.open
+            connection?.open
           ) {
             try {
-              conn.send({
-                t:
+              connection.send({
+                type:
                   'ping',
-
                 ts:
                   Date.now(),
               });
@@ -1630,148 +1125,136 @@ function createPlayerPeer(
         heartbeatTimer
       );
 
-      heartbeatTimer =
-        null;
+      heartbeatTimer = null;
     }
   }
 
   return {
     start,
 
-    isConnected() {
-      return !!(
-        conn &&
-        conn.open
-      );
-    },
-
     send(data) {
       if (
-        conn?.open
+        connection?.open
       ) {
         try {
-          conn.send(
+          connection.send(
             data
           );
-
-          log(
-            `→ DM ${data?.t ?? typeof data}`
-          );
-        } catch (
-          error
-        ) {
-          log(
-            `send failed: ${error.message}`
-          );
-        }
-      } else {
-        log(
-          `not sent: no DM connection`
-        );
+        } catch {}
       }
     },
 
-    reconnectNow,
+    isConnected() {
+      return !!(
+        connection &&
+        connection.open
+      );
+    },
+
+    reconnectNow() {
+      if (
+        destroyed ||
+        connection?.open
+      ) {
+        return;
+      }
+
+      if (
+        reconnectTimer
+      ) {
+        clearTimeout(
+          reconnectTimer
+        );
+
+        reconnectTimer = null;
+      }
+
+      if (
+        peer?.disconnected
+      ) {
+        try {
+          peer.reconnect();
+        } catch {}
+      } else {
+        connect();
+      }
+    },
 
     status() {
-      log(
-        `player peer: ` +
+      options.log(
+        `Player peer: ` +
         `signaling=${
           peer?.disconnected
             ? 'DISCONNECTED'
-            : peer?.destroyed
-              ? 'destroyed'
-              : peer
-                ? 'connected'
-                : 'none'
+            : peer
+              ? 'connected'
+              : 'none'
         } ` +
-        `channel=${
-          conn?.open
+        `data=${
+          connection?.open
             ? 'open'
             : 'closed'
-        } ` +
-        `attempts=${connectAttempt}`
+        }`
       );
     },
 
     destroy() {
-      destroyed =
-        true;
+      destroyed = true;
 
-      cancelReconnect();
       clearTimeout(
         attemptTimer
       );
 
+      if (
+        reconnectTimer
+      ) {
+        clearTimeout(
+          reconnectTimer
+        );
+
+        reconnectTimer = null;
+      }
+
       stopHeartbeat();
 
       try {
-        conn?.close();
+        connection?.close();
       } catch {}
 
       try {
         peer?.destroy();
       } catch {}
 
-      conn =
-        null;
-
-      peer =
-        null;
+      connection = null;
+      peer = null;
     },
   };
 }
 
 // -----------------------------------------------------------------------------
-// Storage
+// Campaign storage
 // -----------------------------------------------------------------------------
 
-const loadAll =
-  () => {
-    try {
-      return (
-        JSON.parse(
-          localStorage.getItem(
-            LS_CAMPAIGNS
-          )
-        ) || {}
-      );
-    } catch {
-      return {};
-    }
-  };
-
-function saveCampaign(
-  campaign
-) {
+function allCampaigns() {
   try {
-    const all =
-      loadAll();
-
-    all[campaign.id] =
-      campaign;
-
-    localStorage.setItem(
-      LS_CAMPAIGNS,
-      JSON.stringify(all)
+    return (
+      JSON.parse(
+        localStorage.getItem(
+          LS_CAMPAIGNS
+        )
+      ) || {}
     );
-  } catch (
-    error
-  ) {
-    alert(
-      'Could not save: ' +
-      error.message
-    );
+  } catch {
+    return {};
   }
 }
 
-function deleteCampaign(
-  id
-) {
+function save(campaign) {
   const all =
-    loadAll();
+    allCampaigns();
 
-  delete all[id];
+  all[campaign.id] =
+    campaign;
 
   localStorage.setItem(
     LS_CAMPAIGNS,
@@ -1780,221 +1263,74 @@ function deleteCampaign(
 }
 
 // -----------------------------------------------------------------------------
-// Log
-// -----------------------------------------------------------------------------
-
-function makeLog(
-  role,
-  onStatus
-) {
-  const pre =
-    h(
-      'pre',
-      {
-        class:
-          'log',
-      }
-    );
-
-  const log =
-    text => {
-      pre.textContent +=
-        `${new Date().toISOString().slice(11, 23)}  ${text}\n`;
-
-      pre.scrollTop =
-        pre.scrollHeight;
-
-      console.log(
-        `[VTTRPG ${role}]`,
-        text
-      );
-    };
-
-  const toolbar =
-    h(
-      'div',
-      {
-        class:
-          'row',
-      },
-
-      onStatus
-        ? h(
-            'button',
-            {
-              onclick:
-                onStatus,
-            },
-            'Log status now'
-          )
-        : null,
-
-      h(
-        'button',
-        {
-          onclick:
-            async () => {
-              try {
-                await navigator.clipboard.writeText(
-                  `VTTRPG v${APP_VERSION} (${role})\n` +
-                  pre.textContent
-                );
-
-                log(
-                  'log copied'
-                );
-              } catch (
-                error
-              ) {
-                log(
-                  `copy failed: ${error.message}`
-                );
-              }
-            },
-        },
-        'Copy log'
-      ),
-
-      h(
-        'button',
-        {
-          onclick:
-            () => {
-              pre.textContent =
-                '';
-            },
-        },
-        'Clear'
-      )
-    );
-
-  activeLog =
-    log;
-
-  log(
-    `VTTRPG v${APP_VERSION} ${role} view started; ` +
-    `page ${location.pathname}`
-  );
-
-  log(
-    `env: online=${navigator.onLine} ` +
-    `secureContext=${isSecureContext} ` +
-    `RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'} ` +
-    `PeerJS=${window.Peer ? 'loaded' : 'MISSING'}`
-  );
-
-  log(
-    `browser: ${navigator.userAgent}`
-  );
-
-  log(
-    `ICE fallback: OpenRelay TURN on 80/443`
-  );
-
-  return {
-    el:
-      h(
-        'div',
-        {},
-        toolbar,
-        pre
-      ),
-
-    log,
-  };
-}
-
-// -----------------------------------------------------------------------------
 // Chat
 // -----------------------------------------------------------------------------
 
-function makeChat(
-  onSend
-) {
+function chatUi(send) {
   const box =
-    h(
-      'div',
-      {
-        class:
-          'chat',
-      }
-    );
+    h('div', {
+      class:
+        'chat',
+    });
 
   const input =
-    h(
-      'input',
-      {
-        placeholder:
-          'Message…',
-
-        maxlength:
-          '500',
-      }
-    );
+    h('input', {
+      placeholder:
+        'Message…',
+      maxlength:
+        '500',
+    });
 
   const button =
     h(
       'button',
-      {},
+      {
+        onclick: submit,
+      },
       'Send'
     );
 
-  const send =
-    () => {
-      const text =
-        input.value.trim();
+  function submit() {
+    const text =
+      input.value.trim();
 
-      if (!text) {
-        return;
-      }
+    if (!text) {
+      return;
+    }
 
-      onSend(
-        text
-      );
-
-      input.value =
-        '';
-    };
+    send(text);
+    input.value = '';
+  }
 
   input.addEventListener(
     'keydown',
     event => {
       if (
-        event.key ===
-        'Enter'
+        event.key === 'Enter'
       ) {
-        send();
+        submit();
       }
     }
   );
 
-  button.addEventListener(
-    'click',
-    send
-  );
-
   return {
-    el:
+    el: h(
+      'div',
+      {},
+      box,
+
       h(
         'div',
-        {},
-        box,
+        {
+          class:
+            'row',
+        },
+        input,
+        button
+      )
+    ),
 
-        h(
-          'div',
-          {
-            class:
-              'row',
-          },
-
-          input,
-          button
-        )
-      ),
-
-    add(
-      message
-    ) {
+    add(message) {
       box.append(
         h(
           'div',
@@ -2011,11 +1347,10 @@ function makeChat(
               class:
                 'ts',
             },
-
             new Date(
               message.ts
             ).toLocaleTimeString() +
-            ' '
+              ' '
           ),
 
           message.sys
@@ -2024,10 +1359,8 @@ function makeChat(
                 h(
                   'b',
                   {},
-                  message.from +
-                    ': '
+                  `${message.from}: `
                 ),
-
                 message.text,
               ]
         )
@@ -2041,155 +1374,34 @@ function makeChat(
       box.replaceChildren();
     },
 
-    setEnabled(
-      enabled
-    ) {
+    enabled(value) {
       input.disabled =
-        !enabled;
+        !value;
 
       button.disabled =
-        !enabled;
+        !value;
     },
   };
 }
-
-// -----------------------------------------------------------------------------
-// Router
-// -----------------------------------------------------------------------------
-
-const $app =
-  document.getElementById(
-    'app'
-  );
-
-let cleanup =
-  null;
-
-function route() {
-  if (
-    cleanup
-  ) {
-    cleanup();
-    cleanup =
-      null;
-  }
-
-  activeLog =
-    null;
-
-  $app.replaceChildren();
-
-  const [
-    hash,
-  ] =
-    (
-      location.hash.replace(
-        /^#/,
-        ''
-      ) || '/'
-    ).split('?');
-
-  let match;
-
-  if (
-    (
-      match =
-        hash.match(
-          /^\/join\/([a-z0-9]+)$/i
-        )
-    )
-  ) {
-    viewPlayer(
-      match[1]
-    );
-
-    return;
-  }
-
-  if (
-    (
-      match =
-        hash.match(
-          /^\/dm\/([a-z0-9]+)$/i
-        )
-    )
-  ) {
-    viewDM(
-      match[1]
-    );
-
-    return;
-  }
-
-  viewHome();
-}
-
-window.addEventListener(
-  'hashchange',
-  route
-);
 
 // -----------------------------------------------------------------------------
 // HOME
 // -----------------------------------------------------------------------------
 
 function viewHome() {
-  const nameInput =
-    h(
-      'input',
-      {
-        placeholder:
-          'New campaign name',
-      }
-    );
+  const name =
+    h('input', {
+      placeholder:
+        'New campaign name',
+    });
 
   const list =
     h('div');
 
-  const create =
-    () => {
-      const name =
-        nameInput.value.trim();
-
-      if (!name) {
-        return;
-      }
-
-      const campaign = {
-        id:
-          rid(10),
-
-        name,
-
-        created:
-          Date.now(),
-
-        roomId:
-          null,
-
-        nextNum:
-          1,
-
-        players:
-          {},
-
-        chat:
-          [],
-      };
-
-      saveCampaign(
-        campaign
-      );
-
-      location.hash =
-        '#/dm/' +
-        campaign.id;
-    };
-
-  function renderList() {
+  function refresh() {
     const campaigns =
       Object.values(
-        loadAll()
+        allCampaigns()
       );
 
     list.replaceChildren(
@@ -2211,28 +1423,6 @@ function viewHome() {
                   ),
 
                   h(
-                    'span',
-                    {
-                      class:
-                        'muted',
-                    },
-
-                    `${
-                      Object.keys(
-                        campaign.players ||
-                        {}
-                      ).length
-                    } players, ` +
-
-                    `${
-                      (
-                        campaign.chat ||
-                        []
-                      ).length
-                    } messages`
-                  ),
-
-                  h(
                     'button',
                     {
                       onclick:
@@ -2242,27 +1432,6 @@ function viewHome() {
                             campaign.id,
                     },
                     'Open as DM'
-                  ),
-
-                  h(
-                    'button',
-                    {
-                      onclick:
-                        () => {
-                          if (
-                            confirm(
-                              `Delete "${campaign.name}"?`
-                            )
-                          ) {
-                            deleteCampaign(
-                              campaign.id
-                            );
-
-                            renderList();
-                          }
-                        },
-                    },
-                    'Delete'
                   )
                 )
             )
@@ -2280,7 +1449,44 @@ function viewHome() {
     );
   }
 
-  $app.append(
+  function create() {
+    const value =
+      name.value.trim();
+
+    if (!value) {
+      return;
+    }
+
+    const campaign = {
+      id:
+        rid(10),
+
+      name:
+        value,
+
+      roomId:
+        null,
+
+      nextNum:
+        1,
+
+      players:
+        {},
+
+      chat:
+        [],
+    };
+
+    save(
+      campaign
+    );
+
+    location.hash =
+      '#/dm/' +
+      campaign.id;
+  }
+
+  app.append(
     h(
       'section',
       {},
@@ -2298,7 +1504,7 @@ function viewHome() {
             'row',
         },
 
-        nameInput,
+        name,
 
         h(
           'button',
@@ -2322,78 +1528,38 @@ function viewHome() {
       ),
 
       list
-    ),
-
-    h(
-      'section',
-      {
-        class:
-          'muted',
-      },
-
-      'Players join using the QR code or link.'
     )
   );
 
-  renderList();
+  refresh();
 }
 
 // -----------------------------------------------------------------------------
 // DM
 // -----------------------------------------------------------------------------
 
-function viewDM(
-  cid
-) {
+function viewDM(id) {
   const campaign =
-    loadAll()[cid];
+    allCampaigns()[id];
 
   if (!campaign) {
-    location.hash =
-      '#/';
-
+    location.hash = '#/';
     return;
   }
 
-  if (
-    !campaign.players ||
-    typeof campaign.players !==
-      'object'
-  ) {
-    campaign.players =
-      {};
-  }
+  campaign.players ||=
+    {};
 
-  if (
-    !Array.isArray(
-      campaign.chat
-    )
-  ) {
-    campaign.chat =
-      [];
-  }
+  campaign.chat ||=
+    [];
 
-  if (!campaign.nextNum) {
-    campaign.nextNum =
-      1;
-  }
+  campaign.nextNum ||=
+    1;
 
-  const save =
-    () =>
-      saveCampaign(
-        campaign
-      );
+  let dm = null;
+  let session = null;
 
-  let dmPeer =
-    null;
-
-  let session =
-    null;
-
-  let opening =
-    false;
-
-  const peers =
+  const live =
     new Map();
 
   const {
@@ -2403,36 +1569,17 @@ function viewDM(
     makeLog(
       'DM',
       () =>
-        dmPeer
-          ? dmPeer.status()
+        dm
+          ? dm.status()
           : log(
-              'no active session'
+              'no session'
             )
     );
 
-  log(
-    `campaign "${campaign.name}" ` +
-    `(${cid}) loaded: ` +
-    `${Object.keys(
-      campaign.players
-    ).length} known players, ` +
-    `${campaign.chat.length} chat messages`
-  );
-
-  const modeSel =
+  const mode =
     h(
       'select',
-      {
-        onchange:
-          () => {
-            if (
-              session
-            ) {
-              session.mode =
-                modeSel.value;
-            }
-          },
-      },
+      {},
 
       h(
         'option',
@@ -2449,7 +1596,7 @@ function viewDM(
           value:
             'open',
         },
-        'Open (auto-approve)'
+        'Open'
       ),
 
       h(
@@ -2462,7 +1609,7 @@ function viewDM(
       )
     );
 
-  const toggleButton =
+  const openButton =
     h(
       'button',
       {
@@ -2475,27 +1622,27 @@ function viewDM(
       'Open session'
     );
 
-  const signal =
+  const status =
     h(
       'span',
       {
         class:
           'tag',
       },
-      'no session'
+      'closed'
     );
 
-  const linkInput =
-    h(
-      'input',
-      {
-        readonly:
-          '',
+  const link =
+    h('input', {
+      readonly:
+        '',
+    });
 
-        placeholder:
-          'Session link',
-      }
-    );
+  const qr =
+    h('div', {
+      id:
+        'qr',
+    });
 
   const lobby =
     h('div');
@@ -2503,31 +1650,57 @@ function viewDM(
   const players =
     h('div');
 
-  const qr =
+  const turn =
+    loadTurn();
+
+  const turnUrls =
+    h('input', {
+      placeholder:
+        'TURN URL, e.g. turn:yourserver:3478',
+      value:
+        turn.urls || '',
+    });
+
+  const turnUser =
+    h('input', {
+      placeholder:
+        'TURN username',
+      value:
+        turn.username || '',
+    });
+
+  const turnPassword =
+    h('input', {
+      placeholder:
+        'TURN credential/password',
+      type:
+        'password',
+      value:
+        turn.credential || '',
+    });
+
+  const turnStatus =
     h(
-      'div',
+      'span',
       {
-        id:
-          'qr',
+        class:
+          'muted',
       }
     );
 
   const chat =
-    makeChat(
+    chatUi(
       text =>
-        postChat(
+        sendChat(
           {
             from:
               'DM',
-
             text,
           }
         )
     );
 
-  chat.setEnabled(
-    false
-  );
+  chat.enabled(false);
 
   campaign.chat
     .slice(-100)
@@ -2535,79 +1708,54 @@ function viewDM(
       chat.add
     );
 
-  function sendTo(
-    data,
-    pid
-  ) {
-    dmPeer?.send(
-      data,
-      pid
+  function saveTurnFields() {
+    const value = {
+      urls:
+        turnUrls.value.trim(),
+
+      username:
+        turnUser.value.trim(),
+
+      credential:
+        turnPassword.value.trim(),
+    };
+
+    saveTurn(
+      value
+    );
+
+    return turnConfig(
+      value
     );
   }
 
-  function approvedPeerIds() {
-    return [
-      ...peers,
-    ]
-      .filter(
-        ([, player]) =>
-          player.status ===
-          'approved'
-      )
-      .map(
-        ([pid]) =>
-          pid
-      );
-  }
+  function testTurn() {
+    const value =
+      saveTurnFields();
 
-  function isOnline(
-    token
-  ) {
-    return [
-      ...peers.values(),
-    ].some(
-      player =>
-        player.token ===
-          token &&
-        player.status ===
-          'approved'
+    if (!value) {
+      turnStatus.textContent =
+        'TURN configuration incomplete.';
+      return;
+    }
+
+    turnStatus.textContent =
+      'TURN saved. It will be tested when WebRTC connects.';
+
+    log(
+      `TURN configured: ${value.urls.join(', ')}`
     );
-  }
-
-  function roster() {
-    return Object.values(
-      campaign.players
-    )
-      .filter(
-        player =>
-          !player.banned
-      )
-      .map(
-        player => ({
-          num:
-            player.num,
-
-          name:
-            player.name,
-
-          online:
-            isOnline(
-              player.token
-            ),
-        })
-      );
   }
 
   function renderLobby() {
     const waiting =
       [
-        ...peers.entries(),
-      ]
-        .filter(
-          ([, player]) =>
-            player.status ===
-            'pending'
-        );
+        ...live.entries(),
+      ].filter(
+        ([, player]) =>
+          player.status ===
+          'pending'
+      );
 
     lobby.replaceChildren(
       ...(
@@ -2628,15 +1776,6 @@ function viewDM(
                     'b',
                     {},
                     player.name
-                  ),
-
-                  h(
-                    'span',
-                    {
-                      class:
-                        'muted',
-                    },
-                    'wants to join'
                   ),
 
                   h(
@@ -2679,20 +1818,30 @@ function viewDM(
   }
 
   function renderPlayers() {
-    const known =
-      Object.entries(
-        campaign.players
-      );
-
     players.replaceChildren(
       ...(
-        known.length
-          ? known.map(
+        Object.entries(
+          campaign.players
+        ).length
+          ? Object.entries(
+              campaign.players
+            ).map(
               ([
                 token,
                 player,
-              ]) =>
-                h(
+              ]) => {
+                const online =
+                  [
+                    ...live.values(),
+                  ].some(
+                    item =>
+                      item.token ===
+                        token &&
+                      item.status ===
+                        'approved'
+                  );
+
+                return h(
                   'div',
                   {
                     class:
@@ -2711,15 +1860,25 @@ function viewDM(
                       class:
                         'tag',
                     },
-
                     player.banned
                       ? 'banned'
-                      : isOnline(
-                          token
-                        )
+                      : online
                         ? 'online'
                         : 'offline'
                   ),
+
+                  !player.banned &&
+                    h(
+                      'button',
+                      {
+                        onclick:
+                          () =>
+                            kick(
+                              token
+                            ),
+                      },
+                      'Kick'
+                    ),
 
                   player.banned
                     ? h(
@@ -2729,46 +1888,27 @@ function viewDM(
                             () => {
                               player.banned =
                                 false;
-
-                              save();
-
+                              save(
+                                campaign
+                              );
                               renderPlayers();
                             },
                         },
                         'Unban'
                       )
-                    : [
-                        isOnline(
-                          token
-                        )
-                          ? h(
-                              'button',
-                              {
-                                onclick:
-                                  () =>
-                                    kick(
-                                      token,
-                                      false
-                                    ),
-                              },
-                              'Kick'
-                            )
-                          : null,
-
-                        h(
-                          'button',
-                          {
-                            onclick:
-                              () =>
-                                kick(
-                                  token,
-                                  true
-                                ),
-                          },
-                          'Ban'
-                        ),
-                      ]
-                )
+                    : h(
+                        'button',
+                        {
+                          onclick:
+                            () =>
+                              ban(
+                                token
+                              ),
+                        },
+                        'Ban'
+                      )
+                );
+              }
             )
           : [
               h(
@@ -2784,34 +1924,19 @@ function viewDM(
     );
   }
 
-  function systemMsg(
-    text
+  function sendChat(
+    message
   ) {
-    postChat(
-      {
-        sys:
-          true,
-
-        text,
-      }
-    );
-  }
-
-  function postChat(
-    partial
-  ) {
-    const message = {
-      id:
-        rid(8),
-
-      ts:
-        Date.now(),
-
-      ...partial,
-    };
-
     campaign.chat.push(
-      message
+      {
+        id:
+          rid(8),
+
+        ts:
+          Date.now(),
+
+        ...message,
+      }
     );
 
     if (
@@ -2825,54 +1950,25 @@ function viewDM(
       );
     }
 
-    save();
-
-    chat.add(
-      message
+    save(
+      campaign
     );
 
-    for (
-      const pid of
-      approvedPeerIds()
-    ) {
-      sendTo(
-        {
-          t:
-            'chat',
+    const latest =
+      campaign.chat.at(-1);
 
-          msg:
-            message,
-        },
-        pid
-      );
-    }
-  }
+    chat.add(
+      latest
+    );
 
-  function sendAccepted(
-    pid,
-    player
-  ) {
-    sendTo(
+    dm?.send(
       {
         t:
-          'accepted',
+          'chat',
 
-        num:
-          player.num,
-
-        name:
-          player.name,
-
-        campaignName:
-          campaign.name,
-
-        history:
-          campaign.chat.slice(-50),
-
-        roster:
-          roster(),
-      },
-      pid
+        msg:
+          latest,
+      }
     );
   }
 
@@ -2880,7 +1976,7 @@ function viewDM(
     pid
   ) {
     const player =
-      peers.get(
+      live.get(
         pid
       );
 
@@ -2888,31 +1984,36 @@ function viewDM(
       return;
     }
 
-    if (
-      player.status ===
-      'approved'
-    ) {
-      return;
-    }
-
-    const existing =
+    const saved =
       campaign.players[
         player.token
       ];
 
-    if (existing) {
+    if (saved) {
       player.status =
         'approved';
 
       player.num =
-        existing.num;
+        saved.num;
 
-      player.name =
-        existing.name;
+      dm.send(
+        {
+          t:
+            'accepted',
 
-      sendAccepted(
-        pid,
-        existing
+          num:
+            saved.num,
+
+          name:
+            saved.name,
+
+          campaignName:
+            campaign.name,
+
+          history:
+            campaign.chat.slice(-50),
+        },
+        pid
       );
 
       renderLobby();
@@ -2921,16 +2022,12 @@ function viewDM(
       return;
     }
 
-    const num =
-      campaign.nextNum++;
-
-    campaign.players[
-      player.token
-    ] = {
+    const newPlayer = {
       token:
         player.token,
 
-      num,
+      num:
+        campaign.nextNum++,
 
       name:
         player.name,
@@ -2939,28 +2036,39 @@ function viewDM(
         false,
     };
 
+    campaign.players[
+      player.token
+    ] =
+      newPlayer;
+
     player.status =
       'approved';
 
     player.num =
-      num;
+      newPlayer.num;
 
-    save();
-
-    log(
-      `APPROVED ${player.name} ` +
-      `as Player ${num}`
+    save(
+      campaign
     );
 
-    sendAccepted(
-      pid,
-      campaign.players[
-        player.token
-      ]
-    );
+    dm.send(
+      {
+        t:
+          'accepted',
 
-    systemMsg(
-      `${player.name} joined as Player ${num}`
+        num:
+          newPlayer.num,
+
+        name:
+          newPlayer.name,
+
+        campaignName:
+          campaign.name,
+
+        history:
+          campaign.chat.slice(-50),
+      },
+      pid
     );
 
     renderLobby();
@@ -2970,7 +2078,7 @@ function viewDM(
   function deny(
     pid
   ) {
-    sendTo(
+    dm.send(
       {
         t:
           'denied',
@@ -2981,251 +2089,75 @@ function viewDM(
       pid
     );
 
-    peers.delete(
+    dm.close(
       pid
     );
 
-    setTimeout(
-      () =>
-        dmPeer?.close(
-          pid
-        ),
-      200
+    live.delete(
+      pid
     );
 
     renderLobby();
   }
 
   function kick(
-    token,
-    ban
+    token
   ) {
     const pid =
       [
-        ...peers,
-      ]
-        .find(
-          ([, player]) =>
-            player.token ===
-            token
-        )?.[0];
+        ...live.entries(),
+      ].find(
+        ([, player]) =>
+          player.token ===
+          token
+      )?.[0];
 
     if (pid) {
-      sendTo(
+      dm.send(
         {
           t:
-            ban
-              ? 'banned'
-              : 'kicked',
+            'kicked',
         },
         pid
       );
 
-      peers.delete(
+      dm.close(
         pid
       );
 
-      setTimeout(
-        () =>
-          dmPeer?.close(
-            pid
-          ),
-        200
+      live.delete(
+        pid
       );
     }
 
-    if (
-      campaign.players[
-        token
-      ]
-    ) {
-      campaign.players[
-        token
-      ].banned =
-        ban;
-
-      save();
-    }
-
-    renderLobby();
     renderPlayers();
-  }
-
-  function handleJoin(
-    message,
-    pid
-  ) {
-    const token =
-      String(
-        message.token ||
-        ''
-      ).slice(
-        0,
-        64
-      );
-
-    const name =
-      String(
-        message.name ||
-        'Player'
-      )
-        .trim()
-        .slice(
-          0,
-          30
-        );
-
-    if (!token) {
-      return;
-    }
-
-    const saved =
-      campaign.players[
-        token
-      ];
-
-    log(
-      `JOIN REQUEST from ${short(pid)} ` +
-      `"${name}" ` +
-      `${
-        saved
-          ? `(known Player ${saved.num})`
-          : '(new)'
-      }`
-    );
-
-    if (
-      saved?.banned
-    ) {
-      sendTo(
-        {
-          t:
-            'denied',
-
-          reason:
-            'You are banned.',
-        },
-        pid
-      );
-
-      return;
-    }
-
-    for (
-      const [
-        otherPid,
-        other,
-      ]
-      of peers
-    ) {
-      if (
-        other.token ===
-          token &&
-        otherPid !==
-          pid
-      ) {
-        peers.delete(
-          otherPid
-        );
-
-        dmPeer?.close(
-          otherPid
-        );
-      }
-    }
-
-    if (saved) {
-      saved.name =
-        name;
-
-      save();
-
-      peers.set(
-        pid,
-        {
-          token,
-
-          name,
-
-          status:
-            'approved',
-
-          num:
-            saved.num,
-        }
-      );
-
-      sendAccepted(
-        pid,
-        saved
-      );
-
-      renderLobby();
-      renderPlayers();
-
-      return;
-    }
-
-    if (
-      session.mode ===
-      'locked'
-    ) {
-      sendTo(
-        {
-          t:
-            'denied',
-
-          reason:
-            'Session is locked.',
-        },
-        pid
-      );
-
-      return;
-    }
-
-    peers.set(
-      pid,
-      {
-        token,
-
-        name,
-
-        status:
-          'pending',
-
-        num:
-          null,
-      }
-    );
-
-    if (
-      session.mode ===
-      'open'
-    ) {
-      approve(
-        pid
-      );
-
-      return;
-    }
-
-    sendTo(
-      {
-        t:
-          'pending',
-      },
-      pid
-    );
-
     renderLobby();
   }
 
-  function onPeerMessage(
-    message,
-    pid
+  function ban(
+    token
   ) {
-    if (!message) {
+    campaign.players[
+      token
+    ].banned =
+      true;
+
+    save(
+      campaign
+    );
+
+    kick(
+      token
+    );
+  }
+
+  function onMessage(
+    pid,
+    message
+  ) {
+    if (
+      !message
+    ) {
       return;
     }
 
@@ -3233,16 +2165,154 @@ function viewDM(
       message.t ===
       'join'
     ) {
-      handleJoin(
-        message,
+      const token =
+        String(
+          message.token || ''
+        );
+
+      const name =
+        String(
+          message.name ||
+          'Player'
+        )
+          .trim()
+          .slice(
+            0,
+            30
+          );
+
+      const saved =
+        campaign.players[
+          token
+        ];
+
+      if (
+        saved?.banned
+      ) {
+        dm.send(
+          {
+            t:
+              'denied',
+
+            reason:
+              'You are banned.',
+          },
+          pid
+        );
+
+        return;
+      }
+
+      if (saved) {
+        live.set(
+          pid,
+          {
+            token,
+
+            name:
+              saved.name,
+
+            num:
+              saved.num,
+
+            status:
+              'approved',
+          }
+        );
+
+        dm.send(
+          {
+            t:
+              'accepted',
+
+            num:
+              saved.num,
+
+            name:
+              saved.name,
+
+            campaignName:
+              campaign.name,
+
+            history:
+              campaign.chat.slice(-50),
+          },
+          pid
+        );
+
+        renderLobby();
+        renderPlayers();
+
+        return;
+      }
+
+      live.set(
+        pid,
+        {
+          token,
+
+          name,
+
+          num:
+            null,
+
+          status:
+            'pending',
+        }
+      );
+
+      if (
+        session.mode ===
+        'open'
+      ) {
+        approve(
+          pid
+        );
+
+        return;
+      }
+
+      if (
+        session.mode ===
+        'locked'
+      ) {
+        dm.send(
+          {
+            t:
+              'denied',
+
+            reason:
+              'Session is locked.',
+          },
+          pid
+        );
+
+        dm.close(
+          pid
+        );
+
+        live.delete(
+          pid
+        );
+
+        return;
+      }
+
+      dm.send(
+        {
+          t:
+            'pending',
+        },
         pid
       );
+
+      renderLobby();
 
       return;
     }
 
     const player =
-      peers.get(
+      live.get(
         pid
       );
 
@@ -3260,8 +2330,7 @@ function viewDM(
     ) {
       const text =
         String(
-          message.text ||
-          ''
+          message.text || ''
         )
           .trim()
           .slice(
@@ -3269,10 +2338,8 @@ function viewDM(
             500
           );
 
-      if (
-        text
-      ) {
-        postChat(
+      if (text) {
+        sendChat(
           {
             from:
               `${player.name} (P${player.num})`,
@@ -3284,184 +2351,175 @@ function viewDM(
     }
   }
 
-  async function openSession() {
+  function openSession() {
     if (
-      opening ||
       session
     ) {
       return;
     }
 
-    opening =
-      true;
+    const configuredTurn =
+      saveTurnFields();
 
-    toggleButton.disabled =
-      true;
-
-    signal.textContent =
-      'connecting…';
+    if (
+      !configuredTurn
+    ) {
+      log(
+        'No TURN configured. ' +
+        'Direct WebRTC will be tried. ' +
+        'For iPhone ↔ Mac across different networks, ' +
+        'a working TURN server is normally required.'
+      );
+    } else {
+      log(
+        `using TURN: ${configuredTurn.urls.join(', ')}`
+      );
+    }
 
     if (!campaign.roomId) {
       campaign.roomId =
         rid(14);
 
-      save();
-
-      log(
-        `created room id ${campaign.roomId}`
+      save(
+        campaign
       );
     }
 
+    opening = true;
+
     log(
-      `opening session: ` +
-      `mode=${modeSel.value}, ` +
-      `room=${campaign.roomId}`
+      `opening session: room=${campaign.roomId} mode=${mode.value}`
     );
 
     const transport =
       createDMPeer(
         campaign.roomId,
         {
+          turn:
+            configuredTurn,
+
           log,
 
           onPlayerConnect:
             pid =>
               log(
-                `player connected ${short(pid)}`
+                `player transport connected ${short(pid)}`
               ),
 
           onPlayerDisconnect:
             pid => {
-              const player =
-                peers.get(
-                  pid
-                );
-
-              if (player) {
-                log(
-                  `${player.name} disconnected`
-                );
-
-                peers.delete(
-                  pid
-                );
-              }
+              live.delete(
+                pid
+              );
 
               renderLobby();
               renderPlayers();
             },
 
-          onMessage:
-            onPeerMessage,
+          onMessage,
 
           onSignaling:
             state => {
               signal.textContent =
-                state ===
-                  'connected'
+                state === 'connected'
                   ? 'signaling OK'
-                  : 'signaling reconnecting…';
+                  : 'signaling reconnecting';
             },
         }
       );
 
-    try {
-      await transport.init();
-    } catch (
-      error
-    ) {
-      log(
-        `COULD NOT OPEN SESSION: ` +
-        `${error.message}`
-      );
+    transport.init()
+      .then(
+        () => {
+          dm =
+            transport;
 
-      transport.destroy();
+          session = {
+            mode:
+              mode.value,
+          };
 
-      opening =
-        false;
+          opening =
+            false;
 
-      toggleButton.disabled =
-        false;
+          openButton.textContent =
+            'Close session';
 
-      signal.textContent =
-        'failed';
+          mode.disabled =
+            true;
 
-      return;
-    }
+          status.textContent =
+            'signaling OK';
 
-    dmPeer =
-      transport;
+          chat.enabled(
+            true
+          );
 
-    session = {
-      mode:
-        modeSel.value,
-    };
+          const params =
+            new URLSearchParams();
 
-    opening =
-      false;
+          if (
+            configuredTurn
+          ) {
+            params.set(
+              'turn',
+              encode(
+                configuredTurn
+              )
+            );
+          }
 
-    toggleButton.disabled =
-      false;
+          const url =
+            `${location.origin}` +
+            `${location.pathname}` +
+            `#/join/${campaign.roomId}` +
+            (
+              params.toString()
+                ? '?' +
+                  params.toString()
+                : ''
+            );
 
-    toggleButton.textContent =
-      'Close session';
+          link.value =
+            url;
 
-    modeSel.disabled =
-      true;
+          qr.replaceChildren();
 
-    chat.setEnabled(
-      true
-    );
+          if (
+            window.QRCode
+          ) {
+            new window.QRCode(
+              qr,
+              {
+                text:
+                  url,
 
-    const link =
-      `${location.origin}` +
-      `${location.pathname}` +
-      `#/join/${campaign.roomId}`;
+                width:
+                  220,
 
-    linkInput.value =
-      link;
+                height:
+                  220,
+              }
+            );
+          }
 
-    qr.replaceChildren();
+          log(
+            `SESSION OPEN – ${PEER_PREFIX}${campaign.roomId}`
+          );
+        }
+      )
+      .catch(
+        error => {
+          opening =
+            false;
 
-    if (
-      window.QRCode
-    ) {
-      new window.QRCode(
-        qr,
-        {
-          text:
-            link,
+          log(
+            `SESSION FAILED: ${error.message}`
+          );
 
-          width:
-            220,
-
-          height:
-            220,
+          transport.destroy();
         }
       );
-
-      log(
-        'QR code generated'
-      );
-    } else {
-      qr.textContent =
-        'QR library could not be loaded.';
-    }
-
-    signal.textContent =
-      'signaling OK';
-
-    log(
-      `SESSION OPEN – DM peer id is ` +
-      `"${PEER_PREFIX}${campaign.roomId}"`
-    );
-
-    log(
-      'TURN fallback is enabled'
-    );
-
-    renderLobby();
-    renderPlayers();
   }
 
   function closeSession() {
@@ -3469,49 +2527,33 @@ function viewDM(
       return;
     }
 
-    for (
-      const pid of
-      peers.keys()
-    ) {
-      sendTo(
-        {
-          t:
-            'closed',
-        },
-        pid
-      );
-    }
+    dm?.destroy();
 
-    peers.clear();
-
-    const oldPeer =
-      dmPeer;
-
-    dmPeer =
+    dm =
       null;
 
     session =
       null;
 
-    modeSel.disabled =
+    live.clear();
+
+    mode.disabled =
       false;
 
-    toggleButton.textContent =
+    openButton.textContent =
       'Open session';
 
-    signal.textContent =
-      'no session';
+    status.textContent =
+      'closed';
 
-    linkInput.value =
+    link.value =
       '';
 
     qr.replaceChildren();
 
-    chat.setEnabled(
+    chat.enabled(
       false
     );
-
-    oldPeer?.destroy();
 
     renderLobby();
     renderPlayers();
@@ -3521,59 +2563,22 @@ function viewDM(
     );
   }
 
-  function exportCampaign() {
-    const blob =
-      new Blob(
-        [
-          JSON.stringify(
-            campaign,
-            null,
-            2
-          ),
-        ],
-        {
-          type:
-            'application/json',
-        }
-      );
+  const savedTurn =
+    loadTurn();
 
-    const url =
-      URL.createObjectURL(
-        blob
-      );
-
-    const link =
-      h(
-        'a',
-        {
-          href:
-            url,
-
-          download:
-            `${campaign.name.replace(
-              /[^\w-]+/g,
-              '_'
-            )}.vttrpg.json`,
-        }
-      );
-
-    document.body.append(
-      link
+  const signal =
+    h(
+      'span',
+      {
+        class:
+          'tag',
+      },
+      'no session'
     );
 
-    link.click();
-    link.remove();
+  $app?.append;
 
-    URL.revokeObjectURL(
-      url
-    );
-
-    log(
-      'campaign exported'
-    );
-  }
-
-  $app.append(
+  app.append(
     h(
       'div',
       {
@@ -3593,16 +2598,7 @@ function viewDM(
       h(
         'b',
         {},
-        `DM view: ${campaign.name}`
-      ),
-
-      h(
-        'button',
-        {
-          onclick:
-            exportCampaign,
-        },
-        'Export'
+        `DM: ${campaign.name}`
       )
     ),
 
@@ -3623,12 +2619,9 @@ function viewDM(
             'row',
         },
 
-        'Join mode:',
-
-        modeSel,
-
-        toggleButton,
-
+        'Mode:',
+        mode,
+        openButton,
         signal
       ),
 
@@ -3638,9 +2631,7 @@ function viewDM(
           class:
             'muted',
         },
-
-        'No PIN. Share the QR code or link. ' +
-        'The public TURN fallback is enabled automatically.'
+        'No PIN.'
       ),
 
       h(
@@ -3650,7 +2641,7 @@ function viewDM(
             'row',
         },
 
-        linkInput,
+        link,
 
         h(
           'button',
@@ -3659,19 +2650,13 @@ function viewDM(
               async () => {
                 try {
                   await navigator.clipboard.writeText(
-                    linkInput.value
+                    link.value
                   );
 
                   log(
                     'join link copied'
                   );
-                } catch (
-                  error
-                ) {
-                  log(
-                    `copy failed: ${error.message}`
-                  );
-                }
+                } catch {}
               },
           },
           'Copy link'
@@ -3688,48 +2673,93 @@ function viewDM(
       h(
         'h2',
         {},
-        'Lobby'
+        'TURN'
       ),
 
+      h(
+        'div',
+        {
+          class:
+            'turn-grid',
+        },
+
+        turnUrls,
+
+        turnUser,
+
+        turnPassword
+      ),
+
+      h(
+        'div',
+        {
+          class:
+            'row',
+        },
+
+        h(
+          'button',
+          {
+            onclick:
+              testTurn,
+          },
+          'Save TURN'
+        ),
+
+        turnStatus
+      ),
+
+      h(
+        'div',
+        {
+          class:
+            'muted',
+        },
+        'Use real TURN credentials. Do not use openrelayproject/openrelayproject as a production credential.'
+      )
+    ),
+
+    h(
+      'section',
+      {},
+      h(
+        'h2',
+        {},
+        'Lobby'
+      ),
       lobby
     ),
 
     h(
       'section',
       {},
-
       h(
         'h2',
         {},
         'Players'
       ),
-
       players
     ),
 
     h(
       'section',
       {},
-
       h(
         'h2',
         {},
         'Chat'
       ),
-
       chat.el
     ),
 
     h(
       'section',
       {},
-
       h(
         'h2',
         {},
         'Connection log'
       ),
-
       logEl
     )
   );
@@ -3739,10 +2769,9 @@ function viewDM(
 
   cleanup =
     () => {
-      dmPeer?.destroy();
-
-      dmPeer =
-        null;
+      dm?.destroy();
+      dm = null;
+      activeLog = null;
     };
 }
 
@@ -3753,13 +2782,22 @@ function viewDM(
 function viewPlayer(
   roomId
 ) {
+  const url =
+    new URL(
+      location.href
+    );
+
+  const turn =
+    parseTurnFromQuery(
+      url.hash.includes('?')
+        ? url.hash.split('?')[1]
+        : ''
+    );
+
   let token =
     sessionStorage.getItem(
       SS_TOKEN
     );
-
-  const newToken =
-    !token;
 
   if (!token) {
     token =
@@ -3777,14 +2815,11 @@ function viewPlayer(
   let state =
     'idle';
 
-  let joinTimer =
-    null;
-
   let wantJoin =
     false;
 
-  let startedAt =
-    0;
+  let joinTimer =
+    null;
 
   const {
     el: logEl,
@@ -3796,15 +2831,9 @@ function viewPlayer(
         peer
           ? peer.status()
           : log(
-              'not connected yet'
+              'not connected'
             )
     );
-
-  log(
-    `link: room ${roomId}; ` +
-    `identity token ${token.slice(0, 6)}… ` +
-    `(${newToken ? 'new for this tab' : 'existing tab token'})`
-  );
 
   const status =
     h(
@@ -3813,16 +2842,7 @@ function viewPlayer(
         class:
           'status',
       },
-      'Enter your name, then join.'
-    );
-
-  const roster =
-    h(
-      'div',
-      {
-        class:
-          'muted',
-      }
+      'Enter your name and join.'
     );
 
   const name =
@@ -3847,8 +2867,7 @@ function viewPlayer(
       'button',
       {
         onclick:
-          () =>
-            joinSession(),
+          joinSession,
       },
       'Join'
     );
@@ -3858,33 +2877,30 @@ function viewPlayer(
       'button',
       {
         onclick:
-          () =>
-            disconnectPlayer(),
+          disconnectPlayer,
       },
       'Disconnect'
     );
 
   const chat =
-    makeChat(
+    chatUi(
       text => {
         if (
           state ===
             'accepted' &&
           peer
         ) {
-          peer.send(
-            {
-              t:
-                'chat',
+          peer.send({
+            t:
+              'chat',
 
-              text,
-            }
-          );
+            text,
+          });
         }
       }
     );
 
-  chat.setEnabled(
+  chat.enabled(
     false
   );
 
@@ -3897,7 +2913,7 @@ function viewPlayer(
       state
     ) {
       log(
-        `state: ${state} -> ${next} | ${text}`
+        `state ${state} -> ${next}: ${text}`
       );
     }
 
@@ -3907,7 +2923,7 @@ function viewPlayer(
     status.textContent =
       text;
 
-    chat.setEnabled(
+    chat.enabled(
       state ===
         'accepted'
     );
@@ -3920,18 +2936,16 @@ function viewPlayer(
       return;
     }
 
-    peer.send(
-      {
-        t:
-          'join',
+    peer.send({
+      t:
+        'join',
 
-        token,
+      token,
 
-        name:
-          name.value.trim() ||
-          'Player',
-      }
-    );
+      name:
+        name.value.trim() ||
+        'Player',
+    });
 
     clearTimeout(
       joinTimer
@@ -3944,14 +2958,9 @@ function viewPlayer(
             state ===
             'joining'
           ) {
-            log(
-              `no reply from the DM ` +
-              `after ${JOIN_REPLY_TIMEOUT_MS / 1000}s`
-            );
-
             setState(
               'joining',
-              'Waiting for the DM…'
+              'Connected, waiting for DM…'
             );
           }
         },
@@ -3973,9 +2982,6 @@ function viewPlayer(
       playerName
     );
 
-    startedAt =
-      performance.now();
-
     wantJoin =
       true;
 
@@ -3985,37 +2991,32 @@ function viewPlayer(
     join.disabled =
       true;
 
-    log(
-      `Join clicked as "${playerName}"`
-    );
-
-    if (
-      peer?.isConnected()
-    ) {
-      setState(
-        'joining',
-        'Connected. Asking the DM…'
-      );
-
-      sendJoin();
-
-      return;
-    }
-
-    if (
-      peer
-    ) {
-      return;
-    }
-
     setState(
       'connecting',
       'Connecting to DM…'
     );
 
+    if (
+      peer?.isConnected()
+    ) {
+      sendJoin();
+      return;
+    }
+
+    if (peer) {
+      return;
+    }
+
+    log(
+      turn
+        ? 'TURN configuration received in link.'
+        : 'No TURN configuration in link.'
+    );
+
     peer =
       createPlayerPeer(
         roomId,
+        turn,
         {
           log,
 
@@ -4026,7 +3027,7 @@ function viewPlayer(
               ) {
                 setState(
                   'joining',
-                  'Connected. Asking the DM…'
+                  'Connected. Asking DM…'
                 );
 
                 sendJoin();
@@ -4036,10 +3037,7 @@ function viewPlayer(
           onDisconnect:
             () => {
               if (
-                state ===
-                  'accepted' ||
-                state ===
-                  'pending'
+                wantJoin
               ) {
                 setState(
                   'connecting',
@@ -4053,195 +3051,143 @@ function viewPlayer(
               attempt,
               delay
             ) => {
-              if (
-                state ===
-                  'connecting' ||
-                state ===
-                  'joining'
-              ) {
-                setState(
-                  'connecting',
-                  `Retry ${attempt} in ` +
-                  `${Math.round(
-                    delay / 1000
-                  )}s…`
-                );
-              }
+              setState(
+                'connecting',
+                `Reconnect ${attempt} in ${Math.round(delay / 1000)}s…`
+              );
             },
 
           onMessage:
-            message =>
-              onMessage(
+            message => {
+              handleMessage(
                 message
-              ),
+              );
+            },
         }
       );
 
     peer.start();
   }
 
-  function onMessage(
+  function handleMessage(
     message
   ) {
-    if (
-      !message ||
-      typeof message !==
-        'object'
-    ) {
+    if (!message) {
       return;
     }
 
-    switch (
-      message.t
+    if (
+      message.t ===
+      'pending'
     ) {
-      case 'pending':
-        clearTimeout(
-          joinTimer
-        );
+      clearTimeout(
+        joinTimer
+      );
 
-        setState(
-          'pending',
-          'Waiting for DM approval…'
-        );
+      setState(
+        'pending',
+        'Waiting for DM approval…'
+      );
 
-        break;
-
-      case 'accepted':
-        clearTimeout(
-          joinTimer
-        );
-
-        chat.clear();
-
-        (
-          message.history ||
-          []
-        ).forEach(
-          chat.add
-        );
-
-        renderRoster(
-          message.roster
-        );
-
-        log(
-          `ACCEPTED as Player ${message.num}; ` +
-          `received ${
-            (
-              message.history ||
-              []
-            ).length
-          } history message(s); ` +
-          `${Math.round(
-            (
-              performance.now() -
-              startedAt
-            ) / 1000
-          )}s`
-        );
-
-        setState(
-          'accepted',
-          `Joined "${message.campaignName}" ` +
-          `as Player ${message.num} (${message.name})`
-        );
-
-        break;
-
-      case 'denied':
-        setState(
-          'denied',
-          `Not admitted: ${
-            message.reason ||
-            'denied'
-          }`
-        );
-
-        unlockForm();
-
-        break;
-
-      case 'kicked':
-        setState(
-          'kicked',
-          'You were kicked by the DM.'
-        );
-
-        disconnectPlayer();
-
-        break;
-
-      case 'banned':
-        setState(
-          'banned',
-          'You were banned by the DM.'
-        );
-
-        disconnectPlayer();
-
-        break;
-
-      case 'closed':
-        clearTimeout(
-          joinTimer
-        );
-
-        setState(
-          'closed',
-          'The DM closed the session.'
-        );
-
-        break;
-
-      case 'chat':
-        if (
-          message.msg
-        ) {
-          chat.add(
-            message.msg
-          );
-        }
-
-        break;
-
-      case 'roster':
-        renderRoster(
-          message.roster
-        );
-
-        break;
-
-      default:
-        log(
-          `unknown message type "${message.t}"`
-        );
+      return;
     }
-  }
 
-  function renderRoster(
-    players = []
-  ) {
-    roster.textContent =
-      'In session: ' +
-      players
-        .map(
-          player =>
-            `P${player.num} ${player.name}` +
-            (
-              player.online
-                ? ''
-                : ' (offline)'
-            )
-        )
-        .join(', ');
-  }
+    if (
+      message.t ===
+      'accepted'
+    ) {
+      clearTimeout(
+        joinTimer
+      );
 
-  function unlockForm() {
-    name.disabled =
-      false;
+      chat.clear();
 
-    join.disabled =
-      false;
+      (
+        message.history ||
+        []
+      ).forEach(
+        chat.add
+      );
+
+      setState(
+        'accepted',
+        `Joined "${message.campaignName}" as Player ${message.num} (${message.name})`
+      );
+
+      return;
+    }
+
+    if (
+      message.t ===
+      'chat'
+    ) {
+      if (
+        message.msg
+      ) {
+        chat.add(
+          message.msg
+        );
+      }
+
+      return;
+    }
+
+    if (
+      message.t ===
+      'denied'
+    ) {
+      setState(
+        'denied',
+        message.reason ||
+          'Denied.'
+      );
+
+      name.disabled =
+        false;
+
+      join.disabled =
+        false;
+
+      return;
+    }
+
+    if (
+      message.t ===
+      'kicked'
+    ) {
+      disconnectPlayer();
+
+      setState(
+        'kicked',
+        'You were kicked by the DM.'
+      );
+
+      return;
+    }
+
+    if (
+      message.t ===
+      'banned'
+    ) {
+      disconnectPlayer();
+
+      setState(
+        'banned',
+        'You were banned by the DM.'
+      );
+
+      return;
+    }
+
+    if (
+      message.t ===
+      'closed'
+    ) {
+      setState(
+        'closed',
+        'DM session closed.'
+      );
+    }
   }
 
   function disconnectPlayer() {
@@ -4257,7 +3203,11 @@ function viewPlayer(
     peer =
       null;
 
-    unlockForm();
+    name.disabled =
+      false;
+
+    join.disabled =
+      false;
 
     setState(
       'idle',
@@ -4265,43 +3215,7 @@ function viewPlayer(
     );
   }
 
-  const onVisible =
-    () => {
-      if (
-        document.visibilityState ===
-          'visible' &&
-        peer &&
-        wantJoin
-      ) {
-        peer.reconnectNow(
-          'tab visible'
-        );
-      }
-    };
-
-  const onOnline =
-    () => {
-      if (
-        peer &&
-        wantJoin
-      ) {
-        peer.reconnectNow(
-          'network online'
-        );
-      }
-    };
-
-  document.addEventListener(
-    'visibilitychange',
-    onVisible
-  );
-
-  window.addEventListener(
-    'online',
-    onOnline
-  );
-
-  $app.append(
+  app.append(
     h(
       'section',
       {},
@@ -4320,15 +3234,11 @@ function viewPlayer(
         },
 
         name,
-
         join,
-
         disconnect
       ),
 
       status,
-
-      roster,
 
       h(
         'div',
@@ -4336,7 +3246,9 @@ function viewPlayer(
           class:
             'muted',
         },
-        'No PIN required.'
+        turn
+          ? 'TURN settings received from DM link.'
+          : 'No TURN settings received.'
       )
     ),
 
@@ -4369,16 +3281,6 @@ function viewPlayer(
 
   cleanup =
     () => {
-      document.removeEventListener(
-        'visibilitychange',
-        onVisible
-      );
-
-      window.removeEventListener(
-        'online',
-        onOnline
-      );
-
       clearTimeout(
         joinTimer
       );
@@ -4394,7 +3296,98 @@ function viewPlayer(
 }
 
 // -----------------------------------------------------------------------------
-// Start
+// TURN storage
 // -----------------------------------------------------------------------------
+
+function loadTurn() {
+  try {
+    return (
+      JSON.parse(
+        localStorage.getItem(
+          LS_TURN
+        )
+      ) || {
+        urls: '',
+        username: '',
+        credential: '',
+      }
+    );
+  } catch {
+    return {
+      urls: '',
+      username: '',
+      credential: '',
+    };
+  }
+}
+
+function saveTurn(turn) {
+  localStorage.setItem(
+    LS_TURN,
+    JSON.stringify(turn)
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Route
+// -----------------------------------------------------------------------------
+
+function route() {
+  if (cleanup) {
+    cleanup();
+    cleanup = null;
+  }
+
+  activeLog = null;
+
+  app.replaceChildren();
+
+  const [hash] =
+    (
+      location.hash.replace(
+        /^#/,
+        ''
+      ) || '/'
+    ).split('?');
+
+  let match;
+
+  if (
+    (
+      match =
+        hash.match(
+          /^\/dm\/([a-z0-9]+)$/i
+        )
+    )
+  ) {
+    viewDM(
+      match[1]
+    );
+
+    return;
+  }
+
+  if (
+    (
+      match =
+        hash.match(
+          /^\/join\/([a-z0-9]+)$/i
+        )
+    )
+  ) {
+    viewPlayer(
+      match[1]
+    );
+
+    return;
+  }
+
+  viewHome();
+}
+
+window.addEventListener(
+  'hashchange',
+  route
+);
 
 route();

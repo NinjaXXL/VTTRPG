@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VTTRPG Skeleton v0.9.0</title>
+  <title>VTTRPG Skeleton v0.10.0</title>
+
   <style>
     body {
       font-family: system-ui, sans-serif;
@@ -65,7 +66,7 @@
     }
 
     .log {
-      height: 20rem;
+      height: 18rem;
       overflow-y: auto;
       font-size: .78rem;
       background: #8881;
@@ -101,21 +102,35 @@
     #qr {
       margin-top: .6rem;
     }
+
+    .turn-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: .2rem;
+    }
+
+    .turn-grid input {
+      width: 100%;
+      box-sizing: border-box;
+      margin-left: 0;
+      margin-right: 0;
+    }
   </style>
 </head>
+
 <body>
-  <h1>VTTRPG – Skeleton v0.9.0</h1>
+  <h1>VTTRPG – Skeleton v0.10.0</h1>
 
   <div id="app">
-    Loading&hellip; (if this stays, check the browser console)
+    Loading…
   </div>
 
   <footer id="version" class="muted">
-    VTTRPG skeleton v0.9.0
+    VTTRPG skeleton v0.10.0
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/davidshimjs-qrcodejs@0.0.2/qrcode.min.js"></script>
-  <script type="module" src="./app.js?v=0.9.0"></script>
+  <script type="module" src="./app.js?v=0.10.0"></script>
 </body>
 </html>
