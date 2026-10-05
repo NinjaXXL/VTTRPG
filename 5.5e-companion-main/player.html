@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dnd-fantasy">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>5.5e Companion - Player</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="favicon-192x192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="favicon-512x512.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="favicon-180x180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#1a1209">
+  <!-- DaisyUI -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet">
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Custom styles -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- Disconnect banner (shown when WebRTC drops) -->
+  <div id="disconnect-banner" class="alert alert-error fixed top-0 left-0 right-0 z-[1000] rounded-none justify-center py-2 text-sm" style="display:none;">
+    Disconnected from DM. The session may have ended.
+  </div>
+
+  <div class="container" style="max-width:720px;">
+
+    <!-- App title (updated to character name once claimed) -->
+    <h1 class="player-page-title">
+      5.5e Companion
+    </h1>
+
+    <!-- ── STEP 1: Enter PIN ── -->
+    <div id="step-join" class="card bg-base-100 shadow-md">
+      <div class="card-body">
+        <h2 class="card-title" style="font-family:var(--font-heading);color:var(--accent);">Join Session</h2>
+        <div class="form-group mt-2">
+          <label for="player-pin">Session PIN</label>
+          <input type="text" id="player-pin" placeholder="Enter session PIN…" autofocus autocomplete="off">
+        </div>
+        <div id="join-error" style="color:var(--accent);font-size:0.9rem;margin-bottom:8px;display:none;"></div>
+        <button class="btn btn-primary w-full" id="btn-join">Join Session</button>
+      </div>
+    </div>
+
+    <!-- ── STEP 2: Pick character ── -->
+    <div id="step-pick" class="card bg-base-100 shadow-md" style="display:none;">
+      <div class="card-body">
+        <h2 class="card-title" style="font-family:var(--font-heading);color:var(--accent);">Choose Your Character</h2>
+        <div id="pick-list" class="char-list mt-3"></div>
+      </div>
+    </div>
+
+    <!-- ── STEP 3: Character sheet ── -->
+    <div id="step-sheet" style="display:none;">
+
+      <!-- Character Sheet Tabs -->
+      <div role="tablist" class="tabs tabs-bordered">
+        <button role="tab" id="tab-btn-stats" class="tab tab-active" data-tab="tab-stats" aria-selected="true" aria-controls="tab-stats">Stats</button>
+        <button role="tab" id="tab-btn-features" class="tab" data-tab="tab-features" aria-selected="false" aria-controls="tab-features">Features</button>
+        <button role="tab" id="tab-btn-equipment" class="tab" data-tab="tab-equipment" aria-selected="false" aria-controls="tab-equipment">Equipment</button>
+        <button role="tab" id="tab-btn-spells" class="tab" data-tab="tab-spells" aria-selected="false" aria-controls="tab-spells">Spells</button>
+      </div>
+
+      <!-- Stats Tab -->
+      <div role="tabpanel" class="tab-content active" id="tab-stats" aria-labelledby="tab-btn-stats">
+        <div class="combat-stats" id="combat-stats"></div>
+        <h3 class="mt-4 mb-2">Ability Scores</h3>
+        <div class="stat-grid" id="ability-grid"></div>
+        <h3 class="mt-4 mb-1">Saving Throws <span id="save-prof-bonus-label" style="font-size:0.82rem;color:var(--text-muted);font-weight:normal;font-family:var(--font-body);"></span></h3>
+        <div class="skills-grid" id="saving-throws-grid"></div>
+        <h3 class="mt-4 mb-1">Skills <span id="prof-bonus-label" style="font-size:0.82rem;color:var(--text-muted);font-weight:normal;font-family:var(--font-body);"></span></h3>
+        <div class="skills-grid" id="skills-grid"></div>
+      </div>
+
+      <!-- Equipment Tab -->
+      <div role="tabpanel" class="tab-content" id="tab-equipment" aria-labelledby="tab-btn-equipment">
+        <div id="equipment-display"></div>
+      </div>
+
+      <!-- Spells Tab -->
+      <div role="tabpanel" class="tab-content" id="tab-spells" aria-labelledby="tab-btn-spells">
+        <div id="spellcasting-info"></div>
+        <div id="spell-slots-display"></div>
+        <div id="spells-display"></div>
+      </div>
+
+      <!-- Features Tab -->
+      <div role="tabpanel" class="tab-content" id="tab-features" aria-labelledby="tab-btn-features">
+        <div class="features-list" id="features-list"></div>
+      </div>
+
+    </div><!-- /#step-sheet -->
+
+  </div><!-- /.container -->
+
+  <!-- Generic Dialog Modal (alert / confirm) -->
+  <dialog id="dialog-overlay" class="modal" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message">
+    <div class="modal-box max-w-md text-center">
+      <h3 class="font-bold text-lg" id="dialog-title"></h3>
+      <p class="py-2" id="dialog-message"></p>
+      <div class="modal-action justify-center" id="dialog-buttons"></div>
+    </div>
+  </dialog>
+
+  <!-- SRD Footer -->
+  <footer class="srd-footer">
+    <p>This app uses content from the <em>Systems Reference Document 5.2</em> by Wizards of the Coast LLC, licensed under the <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">Creative Commons Attribution 4.0 International License</a>.</p>
+    <p>This app is not affiliated with, endorsed, sponsored, or approved by Wizards of the Coast LLC.</p>
+  </footer>
+
+  <script src="https://unpkg.com/peerjs@1/dist/peerjs.min.js"></script>
+  <script src="js/constants.js"></script>
+  <script src="js/peer.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/pwa.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "5.5e-companion",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "verify": "node scripts/verify-static.mjs",
+    "test": "npm run verify"
+  }
+}

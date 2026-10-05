@@ -1,0 +1,5 @@
+# Keep CI, release, and repository policy changes visible to the maintainer.
+/.github/ @volnuttz
+/scripts/ @volnuttz
+/package.json @volnuttz
+/package-lock.json @volnuttz

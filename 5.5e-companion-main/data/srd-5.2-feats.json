@@ -1,0 +1,19 @@
+[
+  {"name":"Alert","category":"Origin","prerequisite":null,"level":null,"description":"Add Proficiency Bonus to Initiative rolls. After rolling Initiative, swap yours with one willing ally's."},
+  {"name":"Magic Initiate","category":"Origin","prerequisite":null,"level":null,"description":"Learn two cantrips and one 1st-level spell from Cleric, Druid, or Wizard lists. Cast the spell once per Long Rest without a slot."},
+  {"name":"Savage Attacker","category":"Origin","prerequisite":null,"level":null,"description":"Once per turn when hitting with a weapon, roll the damage dice twice and use either result."},
+  {"name":"Skilled","category":"Origin","prerequisite":null,"level":null,"description":"Gain proficiency in any combination of three skills or tools. Repeatable."},
+  {"name":"Ability Score Improvement","category":"General","prerequisite":null,"level":"4+","description":"Increase one ability score by 2, or two by 1 each. Cannot exceed 20. Repeatable."},
+  {"name":"Grappler","category":"General","prerequisite":"Strength or Dexterity 13+","level":"4+","description":"Increase STR or DEX by 1. Advantage against grappled creatures. Move grappled creatures without extra movement."},
+  {"name":"Archery","category":"Fighting Style","prerequisite":"Fighting Style Feature","level":null,"description":"+2 bonus to attack rolls with Ranged weapons."},
+  {"name":"Defense","category":"Fighting Style","prerequisite":"Fighting Style Feature","level":null,"description":"While wearing armor, gain +1 bonus to AC."},
+  {"name":"Great Weapon Fighting","category":"Fighting Style","prerequisite":"Fighting Style Feature","level":null,"description":"When rolling damage with a Two-Handed or Versatile weapon, treat any 1 or 2 on a damage die as 3."},
+  {"name":"Two-Weapon Fighting","category":"Fighting Style","prerequisite":"Fighting Style Feature","level":null,"description":"Add your ability modifier to the extra attack's damage with a Light weapon."},
+  {"name":"Boon of Combat Prowess","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase one ability score by 1 (max 30). When missing an attack, you can hit instead; resets next turn."},
+  {"name":"Boon of Dimensional Travel","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase one ability score by 1 (max 30). After Attack or Magic action, teleport up to 30 feet."},
+  {"name":"Boon of Fate","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase one ability score by 1 (max 30). Roll 2d4 to apply as bonus or penalty to a creature's d20 test within 60 feet."},
+  {"name":"Boon of Irresistible Offense","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase STR or DEX by 1 (max 30). Bludgeoning, Piercing, and Slashing damage ignores Resistance."},
+  {"name":"Boon of Spell Recall","category":"Epic Boon","prerequisite":"Spellcasting Feature","level":"19+","description":"Increase INT, WIS, or CHA by 1 (max 30). When casting level 1-4 spells, roll 1d4; if matching slot level, slot isn't expended."},
+  {"name":"Boon of the Night Spirit","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase one ability score by 1 (max 30). In Dim Light or Darkness, become Invisible as a Bonus Action. Resistance to all damage except Psychic and Radiant."},
+  {"name":"Boon of Truesight","category":"Epic Boon","prerequisite":null,"level":"19+","description":"Increase one ability score by 1 (max 30). Gain Truesight 60 feet."}
+]

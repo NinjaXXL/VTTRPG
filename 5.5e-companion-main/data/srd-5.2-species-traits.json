@@ -1,0 +1,60 @@
+{
+  "Dragonborn": [
+    {"name":"Draconic Ancestry","description":"Choose a dragon type that determines your Breath Weapon damage type and Damage Resistance."},
+    {"name":"Breath Weapon","description":"Replace an attack with magical energy in a 15-ft cone or 30-ft line, dealing 1d10 damage (scales with level)."},
+    {"name":"Damage Resistance","description":"Gain resistance to damage type matching your chosen draconic ancestry."},
+    {"name":"Darkvision","description":"See in darkness up to 60 feet."},
+    {"name":"Draconic Flight","description":"At level 5, gain temporary flight for 10 minutes as a bonus action (once per long rest)."}
+  ],
+  "Dwarf": [
+    {"name":"Darkvision","description":"See in darkness up to 120 feet."},
+    {"name":"Dwarven Resilience","description":"Gain poison damage resistance and advantage on poison condition saves."},
+    {"name":"Dwarven Toughness","description":"Hit point maximum increases by 1, plus 1 per level gained."},
+    {"name":"Stonecunning","description":"Bonus action to gain tremorsense 60 feet on stone surfaces (limited uses per proficiency bonus)."}
+  ],
+  "Elf": [
+    {"name":"Darkvision","description":"See in darkness up to 60 feet."},
+    {"name":"Elven Lineage","description":"Choose Drow, High Elf, or Wood Elf lineage granting cantrips and leveled spells at levels 1, 3, and 5."},
+    {"name":"Fey Ancestry","description":"Advantage on saving throws against the charmed condition."},
+    {"name":"Keen Senses","description":"Proficiency in Insight, Perception, or Survival."},
+    {"name":"Trance","description":"Don't sleep; complete long rest in 4 hours of meditation while retaining consciousness."}
+  ],
+  "Gnome": [
+    {"name":"Darkvision","description":"See in darkness up to 60 feet."},
+    {"name":"Gnomish Cunning","description":"Advantage on INT, WIS, and CHA saving throws."},
+    {"name":"Gnomish Lineage","description":"Choose Forest or Rock Gnome subtype with distinct cantrips and spell abilities."}
+  ],
+  "Goliath": [
+    {"name":"Giant Ancestry","description":"Select one supernatural benefit from cloud, fire, frost, hill, stone, or storm giant heritage (limited uses)."},
+    {"name":"Large Form","description":"At level 5, transform to Large size as bonus action for 10 minutes, gaining advantage on Strength checks."},
+    {"name":"Powerful Build","description":"Advantage on checks to end grappled condition; count as larger for carrying capacity."}
+  ],
+  "Halfling": [
+    {"name":"Brave","description":"Advantage on saving throws against the frightened condition."},
+    {"name":"Halfling Nimbleness","description":"Move through spaces of creatures larger than you."},
+    {"name":"Luck","description":"Reroll d20 when you initially roll a 1 and use the new result."},
+    {"name":"Naturally Stealthy","description":"Take Hide action while obscured only by creatures at least one size larger."}
+  ],
+  "Human": [
+    {"name":"Resourceful","description":"Gain Heroic Inspiration upon completing a long rest."},
+    {"name":"Skillful","description":"Gain proficiency in one skill of your choice."},
+    {"name":"Versatile","description":"Gain an origin feat of your choice."}
+  ],
+  "Orc": [
+    {"name":"Adrenaline Rush","description":"Take Dash as bonus action, gaining temporary HP equal to proficiency bonus (limited uses)."},
+    {"name":"Darkvision","description":"See in darkness up to 120 feet."},
+    {"name":"Relentless Endurance","description":"When reduced to 0 HP but not killed, drop to 1 HP instead (once per long rest)."}
+  ],
+  "Tiefling": [
+    {"name":"Darkvision","description":"See in darkness up to 60 feet."},
+    {"name":"Fiendish Legacy","description":"Choose abyssal, chthonic, or infernal legacy granting damage resistance, cantrips, and leveled spells."},
+    {"name":"Otherworldly Presence","description":"Know the Thaumaturgy cantrip using your fiendish legacy spellcasting ability."}
+  ],
+  "Aasimar": [
+    {"name":"Celestial Resistance","description":"Resistance to Necrotic and Radiant damage."},
+    {"name":"Darkvision","description":"See in darkness up to 60 feet."},
+    {"name":"Healing Hands","description":"Touch a creature to restore HP equal to 1d4 per proficiency bonus (limited uses)."},
+    {"name":"Light Bearer","description":"Know the Light cantrip, using CHA as spellcasting ability."},
+    {"name":"Celestial Revelation","description":"At level 3, choose a transformation (Heavenly Wings, Inner Radiance, or Necrotic Shroud) as bonus action for 1 minute."}
+  ]
+}

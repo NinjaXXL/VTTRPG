@@ -1,0 +1,30 @@
+SRD 5.2 Content License
+=======================
+
+This application includes content from the Systems Reference Document 5.2
+("SRD 5.2") by Wizards of the Coast LLC.
+
+The SRD 5.2 is licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0).
+
+You may obtain a copy of this license at:
+https://creativecommons.org/licenses/by/4.0/legalcode
+
+The following data files contain content derived from the SRD 5.2:
+  - data/srd-5.2-spells.json
+  - data/srd-5.2-monsters.json
+  - data/srd-5.2-equipment.json
+  - data/srd-5.2-class-features.json
+  - data/srd-5.2-species-traits.json
+  - data/srd-5.2-feats.json
+
+Attribution:
+  Systems Reference Document 5.2
+  Copyright 2025 Wizards of the Coast LLC
+  Licensed under CC BY 4.0
+  https://www.dndbeyond.com/resources/1781-systems-reference-document-srd
+
+Disclaimer:
+  This application is not affiliated with, endorsed, sponsored, or
+  approved by Wizards of the Coast LLC. Dungeons & Dragons and D&D
+  are registered trademarks of Wizards of the Coast LLC.

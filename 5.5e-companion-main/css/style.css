@@ -1,0 +1,1595 @@
+/* === FONTS === */
+/* Cinzel Decorative: ornate display for title/hero headings (closest to D&D Beyond's condensed display font) */
+/* Cinzel: elegant serif headings across the UI */
+/* Lora: refined serif body text — better screen legibility than Crimson Text */
+@import url('https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Cinzel:wght@400;600;700;900&family=Lora:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap');
+
+/* ============================================================
+   CUSTOM DND-FANTASY DAISY UI THEME
+   (loaded after DaisyUI CDN, so these vars override defaults)
+   ============================================================ */
+[data-theme="dnd-fantasy"] {
+  /* Primary: Deep Crimson */
+  --p: 0 51% 36%;
+  --pf: 0 51% 26%;
+  --pc: 0 0% 97%;
+  /* Secondary: Dark Gold */
+  --s: 40 57% 30%;
+  --sf: 40 57% 22%;
+  --sc: 0 0% 97%;
+  /* Accent: Gold Light */
+  --a: 42 55% 47%;
+  --af: 42 55% 37%;
+  --ac: 0 0% 15%;
+  /* Neutral (dark gray) */
+  --n: 0 0% 22%;
+  --nf: 0 0% 16%;
+  --nc: 0 0% 95%;
+  /* Base (light gray) */
+  --b1: 0 0% 97%;
+  --b2: 0 0% 92%;
+  --b3: 0 0% 86%;
+  --bc: 0 0% 17%;
+  /* Status colors */
+  --in: 211 70% 53%;
+  --inc: 0 0% 100%;
+  --su: 153 47% 35%;
+  --suc: 0 0% 100%;
+  --wa: 38 92% 50%;
+  --wac: 0 0% 15%;
+  --er: 0 70% 51%;
+  --erc: 0 0% 100%;
+  /* Shape & animation */
+  --rounded-box: 0.5rem;
+  --rounded-btn: 0.375rem;
+  --rounded-badge: 1.9rem;
+  --animation-btn: 0.2s;
+  --animation-input: 0.18s;
+  --btn-text-case: none;
+  --btn-focus-scale: 0.97;
+  --border-btn: 1px;
+  --tab-border: 2px;
+  --tab-radius: 0.25rem;
+}
+
+/* ============================================================
+   LEGACY CSS VARIABLES (referenced by inline styles in JS)
+   ============================================================ */
+:root {
+  --accent: hsl(0, 51%, 36%);
+  --accent-hover: hsl(0, 51%, 43%);
+  --gold: hsl(40, 57%, 30%);
+  --gold-light: hsl(42, 55%, 47%);
+  --bg-dark: hsl(0, 0%, 93%);
+  --bg-card: hsl(0, 0%, 99%);
+  --bg-input: hsl(0, 0%, 96%);
+  --text: hsl(0, 0%, 17%);
+  --text-muted: hsl(0, 0%, 42%);
+  --border: hsl(0, 0%, 82%);
+  --border-dark: hsl(0, 0%, 70%);
+  --hp-high: #3a7d44;
+  --hp-mid: #c08a1e;
+  --hp-low: #c0392b;
+  --shadow-sm: 0 1px 4px rgba(0,0,0,0.06);
+  --shadow-md: 0 3px 12px rgba(0,0,0,0.10);
+  --shadow-lift: 0 6px 20px rgba(0,0,0,0.14);
+  --radius: 8px;
+  --font-heading: 'Cinzel', serif;
+  --font-display: 'Cinzel Decorative', 'Cinzel', serif;
+  --font-body: 'Lora', 'Crimson Text', Georgia, serif;
+}
+
+/* ============================================================
+   GLOBAL RESETS & BASE
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-body);
+  background-color: var(--bg-dark);
+  background-image: url('../img/background_texture.png');
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+  color: hsl(0, 0%, 17%);
+}
+
+a { color: hsl(0, 0%, 25%); }
+a:hover { color: hsl(0, 0%, 10%); }
+
+/* ============================================================
+   BUTTON OVERRIDES (DaisyUI btn + our custom variants)
+   ============================================================ */
+.btn {
+  font-family: var(--font-heading);
+  letter-spacing: 0.04em;
+  border-radius: 0.375rem;
+}
+
+/* Primary button: dark grey */
+.btn.btn-primary,
+button.btn-primary {
+  background-color: hsl(0, 0%, 25%) !important;
+  border-color: hsl(0, 0%, 18%) !important;
+  color: #fff !important;
+}
+.btn.btn-primary:hover,
+button.btn-primary:hover {
+  background-color: hsl(0, 0%, 33%) !important;
+  border-color: hsl(0, 0%, 25%) !important;
+}
+
+/* Secondary button: light gray */
+.btn.btn-secondary,
+button.btn-secondary {
+  background-color: hsl(0, 0%, 92%) !important;
+  border-color: hsl(0, 0%, 78%) !important;
+  color: hsl(0, 0%, 18%) !important;
+}
+.btn.btn-secondary:hover,
+button.btn-secondary:hover {
+  background-color: hsl(0, 0%, 85%) !important;
+  border-color: hsl(0, 0%, 68%) !important;
+}
+
+/* .btn-danger is our existing name; map to DaisyUI error colors */
+.btn.btn-danger,
+button.btn-danger {
+  background-color: hsl(var(--er));
+  border-color: hsl(var(--er));
+  color: hsl(var(--erc));
+}
+.btn.btn-danger:hover,
+button.btn-danger:hover {
+  background-color: hsl(0 70% 44%);
+  border-color: hsl(0 70% 44%);
+}
+
+/* Session toggle — sized up and high-contrast in both states.
+   In DaisyUI's toggle, `currentColor` paints the track and `--tglbg` paints
+   the thumb. The off state needs an explicit gray track so the white thumb
+   stays visible (otherwise both pick up the sidebar's pale text color). */
+#session-toggle {
+  height: 1.6rem;
+  width: 3rem;
+  --handleoffset: 1.4rem;
+  color: hsl(0, 0%, 55%) !important;
+  background-color: hsl(0, 0%, 55%) !important;
+  border-color: hsl(0, 0%, 35%) !important;
+  --tglbg: #ffffff;
+}
+#session-toggle:checked {
+  color: var(--accent) !important;
+  background-color: var(--accent) !important;
+  border-color: hsl(0, 51%, 26%) !important;
+  --tglbg: #ffffff;
+}
+#session-toggle:hover { box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08); }
+
+/* .btn-small is our existing name; map to DaisyUI btn-sm sizing */
+.btn.btn-small,
+button.btn-small {
+  padding: 0.45rem 1rem;
+  height: auto;
+  min-height: 2.25rem;
+  font-size: 0.85rem;
+}
+
+/* ============================================================
+   CHECKBOXES — crimson D&D accent style
+   ============================================================ */
+input[type="checkbox"]:not(.collapse > input):not(.toggle) {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid hsl(0, 0%, 55%);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+  position: relative;
+}
+input[type="checkbox"]:not(.collapse > input):not(.toggle):checked {
+  background-color: hsl(0, 60%, 40%);
+  border-color: hsl(0, 60%, 36%);
+}
+input[type="checkbox"]:not(.collapse > input):not(.toggle):checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0px;
+  width: 5px;
+  height: 9px;
+  border: 2px solid #fff;
+  border-top: none;
+  border-left: none;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:not(.collapse > input):not(.toggle):hover {
+  border-color: hsl(0, 60%, 40%);
+}
+
+/* DaisyUI drawer-toggle checkbox should stay hidden */
+.drawer-toggle {
+  appearance: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  border: none !important;
+  position: absolute !important;
+  opacity: 0 !important;
+}
+
+/* ============================================================
+   REMOVE BUTTON (× delete button used in JS-generated lists)
+   ============================================================ */
+.remove-item {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.remove-item:hover {
+  color: hsl(var(--er));
+  background: hsla(0, 70%, 51%, 0.1);
+  border-color: hsla(0, 70%, 51%, 0.3);
+}
+
+/* ============================================================
+   MAIN CONTAINER
+   ============================================================ */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1.25rem 2rem;
+}
+
+@media (min-width: 1200px) {
+  .container { max-width: 1150px; padding: 1.5rem 2rem 2.5rem; }
+}
+
+/* ============================================================
+   NAVBAR (DaisyUI navbar, with custom DND styling)
+   ============================================================ */
+.navbar {
+  background: hsl(0, 0%, 13%);
+  box-shadow: 0 2px 16px rgba(0,0,0,0.4);
+  border-bottom: 2px solid hsl(0, 60%, 40%);
+}
+
+.top-bar-title {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: hsl(42, 55%, 88%);
+  white-space: nowrap;
+  letter-spacing: 0.06em;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.4);
+}
+
+/* Hamburger icon (three-line) inside the DaisyUI btn */
+.hamburger-icon {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.hamburger-icon span {
+  display: block;
+  width: 20px;
+  height: 2px;
+  background: hsl(42, 38%, 93%);
+  border-radius: 2px;
+}
+
+.top-bar-search-wrap {
+  position: relative;
+  flex: 1;
+  max-width: 480px;
+  margin-right: auto;
+}
+
+.top-bar-search-wrap .input {
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+}
+.top-bar-search-wrap .input::placeholder { color: rgba(240,236,227,0.4); }
+.top-bar-search-wrap .input:focus {
+  background: rgba(255,255,255,0.15);
+  border-color: hsl(0, 0%, 80%);
+  color: hsl(0, 0%, 90%);
+}
+
+.top-bar-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border-dark);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  z-index: 500;
+  overflow: clip;
+}
+.top-bar-dropdown.open { display: block; }
+
+.top-bar-filters {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-dark);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.top-bar-filter-row { display: flex; gap: 0.375rem; flex-wrap: wrap; }
+
+.top-bar-results {
+  max-height: 60vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
+.top-bar-hint {
+  padding: 0.875rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+
+/* ============================================================
+   DRAWER SIDE (sidebar) — DaisyUI drawer with custom DND styling
+   ============================================================ */
+.menu-sidebar {
+  background: hsl(0, 0%, 10%);
+  color: hsl(42, 38%, 93%);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.sidebar-title {
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  color: hsl(42, 38%, 93%);
+  letter-spacing: 0.05em;
+}
+
+.sidebar-section {
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.sidebar-section h3 {
+  font-family: var(--font-heading);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(240,236,227,0.45);
+  margin-bottom: 0.75rem;
+}
+.sidebar-btn {
+  width: 100%;
+  margin-bottom: 0.5rem;
+  justify-content: flex-start;
+  background: rgba(255,255,255,0.07) !important;
+  border-color: rgba(255,255,255,0.12) !important;
+  color: hsl(42, 38%, 93%) !important;
+}
+.sidebar-btn:hover {
+  background: rgba(255,255,255,0.13) !important;
+  border-color: rgba(255,255,255,0.2) !important;
+}
+
+/* ============================================================
+   SIDEBAR SESSION SECTION
+   ============================================================ */
+.sidebar-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+  cursor: pointer;
+  color: hsl(42, 38%, 93%);
+  font-size: 0.9rem;
+}
+
+#session-status {
+  font-size: 0.78rem;
+  color: rgba(240, 236, 227, 0.55);
+  font-style: italic;
+  min-height: 1rem;
+  margin-bottom: 0.5rem;
+}
+#session-status.pill-active {
+  color: hsl(142, 50%, 60%);
+}
+#session-status.pill-inactive {
+  color: rgba(240, 236, 227, 0.4);
+}
+
+/* ============================================================
+   TABS (DaisyUI tabs-bordered with DND theme overrides)
+   JS toggles .tab-active for active state
+   ============================================================ */
+.tabs {
+  display: flex !important;
+  flex-wrap: wrap;
+  background: var(--bg-card);
+  gap: 0.25rem;
+  padding: 0.4rem 0.6rem;
+  align-items: center;
+}
+
+.tab {
+  font-family: var(--font-heading);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  padding: 0.45rem 1.1rem !important;
+  border: none !important;
+  background: none !important;
+  color: var(--text-muted) !important;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.2s, background 0.2s;
+  text-transform: uppercase;
+  height: auto !important;
+  min-height: unset !important;
+  flex: none;
+  text-align: center;
+  border-radius: 999px;
+}
+.tab:hover { color: hsl(0, 51%, 30%) !important; background: hsla(0, 51%, 36%, 0.1) !important; }
+.tab.tab-active,
+.tab[aria-selected="true"] {
+  color: #f5ede0 !important;
+  background: hsl(0, 51%, 36%) !important;
+  font-weight: 700;
+}
+
+.tab-content { display: none; padding-top: 1rem; }
+.tab-content.active { display: block; }
+
+/* Smallest-phone tab pill overrides live with the rest of the 480px
+   responsive rules near the bottom of this file. */
+
+/* ============================================================
+   MODALS (DaisyUI <dialog> with DND theme overrides)
+   ============================================================ */
+.modal {
+  z-index: 900;
+}
+
+.modal-box {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-dark);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+  max-width: 720px;
+  width: 100%;
+  padding: 0;
+  animation: modalIn 0.18s ease;
+}
+
+/* Modal size tokens — replaces ad-hoc inline max-width overrides */
+.modal-box.modal-sm { max-width: 420px; }
+.modal-box.modal-md { max-width: 600px; }
+.modal-box.modal-lg { max-width: 760px; }
+.modal-box.modal-xl { max-width: 1024px; }
+
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(-12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-backdrop {
+  background: rgba(0, 0, 0, 0.5) !important;
+  backdrop-filter: blur(4px);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: hsl(0, 0%, 96%);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: hsl(0, 0%, 17%);
+  font-family: var(--font-heading);
+}
+
+.modal-body {
+  padding: 1.25rem;
+  overflow-y: auto;
+  max-height: calc(100dvh - 14rem);
+  overscroll-behavior: contain;
+}
+
+/* Dialog modal (alert / confirm / prompt) — must sit above modals AND toasts */
+#dialog-overlay {
+  z-index: 1200;
+}
+#dialog-overlay .modal-box {
+  padding: 2rem;
+  max-width: 440px;
+  text-align: center;
+}
+#dialog-overlay h3 {
+  font-family: var(--font-heading);
+  color: hsl(0, 0%, 17%);
+  margin-bottom: 0.5rem;
+  font-size: 1.1rem;
+}
+#dialog-overlay p { color: var(--text-muted); margin-bottom: 1.25rem; font-size: 0.95rem; }
+
+/* ============================================================
+   QR MODAL
+   ============================================================ */
+.qr-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.qr-url {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+  word-break: break-all;
+}
+
+/* ============================================================
+   FORMS
+   ============================================================ */
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.875rem;
+}
+.form-group label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: var(--font-heading);
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--text);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  outline: none;
+  width: 100%;
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: hsl(0, 0%, 40%);
+  box-shadow: 0 0 0 2px hsla(0, 0%, 40%, 0.18);
+}
+.form-group input::placeholder { color: var(--text-muted); opacity: 0.5; }
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.875rem;
+}
+.form-row-4col { grid-template-columns: repeat(4, 1fr); }
+.stat-row { grid-template-columns: repeat(6, 1fr); }
+.currency-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.5rem; }
+
+
+.section-divider {
+  text-align: center;
+  margin: 1.25rem 0 0.75rem;
+  font-family: var(--font-heading);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  color: hsl(0, 0%, 30%);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  text-transform: uppercase;
+}
+.section-divider::before, .section-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-dark), transparent);
+}
+
+/* Inline search bars within modals */
+.search-bar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; align-items: center; }
+.search-bar input:not(.input), .search-bar select:not(.select) {
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-bar input:not(.input) { flex: 1; min-width: 140px; }
+.search-bar input:not(.input):focus, .search-bar select:not(.select):focus {
+  border-color: hsl(0, 0%, 40%);
+}
+
+/* Inline list-section (search results within modal) */
+.list-section { }
+
+/* DaisyUI form input overrides for our theme */
+.form-group .input,
+.form-group .select,
+.search-bar .input,
+.search-bar .select {
+  background: var(--bg-input);
+  border-color: var(--border);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--text);
+  height: 2.5rem;
+  min-height: 2.5rem;
+}
+.form-group .input.input-sm,
+.form-group .select.select-sm,
+.search-bar .input.input-sm,
+.search-bar .select.select-sm {
+  height: 2.25rem;
+  min-height: 2.25rem;
+  font-size: 0.95rem;
+}
+.form-group .input:focus,
+.form-group .select:focus,
+.search-bar .input:focus,
+.search-bar .select:focus {
+  border-color: hsl(0, 0%, 40%);
+  box-shadow: 0 0 0 2px hsla(0, 0%, 40%, 0.18);
+  outline: none;
+}
+.form-group .input::placeholder,
+.search-bar .input::placeholder { color: var(--text-muted); opacity: 0.5; }
+
+/* DaisyUI collapse overrides for character form sections */
+.char-form-collapse {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.char-form-collapse .collapse-title {
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  padding: 0.75rem 1rem;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+}
+.char-form-collapse .collapse-title::after {
+  color: var(--text-muted);
+}
+.char-form-collapse .collapse-content {
+  padding: 0.75rem 1rem 1rem;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+}
+
+/* Skill / Save check grids */
+.skill-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+.save-check-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+/* DaisyUI divider styling for form sections */
+.modal-body .divider {
+  font-family: var(--font-heading);
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  color: hsl(0, 0%, 30%);
+  text-transform: uppercase;
+  margin: 1rem 0 0.75rem;
+}
+.modal-body .divider::before,
+.modal-body .divider::after {
+  background-color: var(--border-dark);
+}
+
+/* Ability modifier badge */
+.ability-mod-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  padding: 0.1rem 0.35rem;
+  font-family: var(--font-heading);
+  font-size: 0.78rem;
+  font-weight: 700;
+  border-radius: 1rem;
+  background: hsl(0, 0%, 90%);
+  color: var(--text);
+  margin-top: 0.15rem;
+}
+.ability-mod-badge.positive { background: hsl(153, 30%, 88%); color: hsl(153, 47%, 28%); }
+.ability-mod-badge.negative { background: hsl(0, 30%, 92%); color: hsl(0, 60%, 40%); }
+
+/* Search result menu items */
+.search-menu-item {
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background 0.12s;
+}
+.search-menu-item:last-child { border-bottom: none; }
+.search-menu-item:hover { background: hsla(0, 0%, 90%, 0.7); }
+
+/* ============================================================
+   CARD BASELINE
+   DaisyUI .card + .card-body handle static HTML cards (in dm.html).
+   JS-generated shop cards render .card without .card-body, so they
+   need explicit padding via the parent container selector.
+   ============================================================ */
+.card {
+  border-top: 2px solid hsl(0, 51%, 36%);
+  transition: box-shadow 0.15s;
+}
+.card:hover {
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+}
+#shops-list > .card { padding: 0.875rem 1rem; }
+
+/* ============================================================
+   LIST ITEMS (search results, feature/spell/equip rows)
+   ============================================================ */
+.list-item {
+  display: flex !important;
+  list-style: none !important;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.875rem;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  transition: background 0.12s;
+}
+.list-item:last-child { border-bottom: none; }
+.list-item:hover { background: hsla(0, 0%, 90%, 0.6); }
+
+/* Compendium / spell / equipment search results */
+.spell-result-item { transition: background 0.12s; }
+.spell-result-item:hover { background: hsla(0, 0%, 90%, 0.7); }
+
+/* Spell class abbreviation badge in search results */
+.spell-classes-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.03em;
+}
+
+/* Equipment item grid (character creation / edit forms) */
+.eq-item-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 56px auto;
+  gap: 6px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+/* ============================================================
+   CHARACTER LIST
+   ============================================================ */
+.char-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition: border-left-color 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+.char-item:hover {
+  border-left-color: hsl(0, 51%, 36%);
+  box-shadow: var(--shadow-md);
+  transform: translateX(2px);
+}
+.char-info { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; }
+.char-name {
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.char-meta { font-size: 0.85rem; color: var(--text-muted); }
+.char-item-actions { display: flex; gap: 6px; }
+
+/* ============================================================
+   BATTLEFIELD CARDS
+   ============================================================ */
+.bf-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.875rem 1rem;
+  margin-bottom: 0.625rem;
+  box-shadow: var(--shadow-sm);
+}
+.bf-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.625rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+.bf-name {
+  font-family: var(--font-heading);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.bf-hp-row {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.375rem;
+}
+.bf-hp-bar-container {
+  flex: 1;
+  height: 14px;
+  background: var(--border);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.bf-hp-bar {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s;
+  min-width: 2px;
+}
+.bf-hp-text {
+  font-weight: 700;
+  font-size: 0.9rem;
+  min-width: 70px;
+  text-align: center;
+  font-family: var(--font-heading);
+}
+.bf-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.5rem; }
+.bf-action-tag {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  color: var(--text-muted);
+  cursor: help;
+  transition: background 0.15s;
+}
+.bf-action-tag:hover { background: var(--border); color: var(--text); }
+
+/* HP Buttons */
+.hp-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-dark);
+  background: var(--bg-input);
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.12s, transform 0.1s;
+  line-height: 1;
+}
+.hp-btn:hover { background: var(--border); }
+.hp-btn:active { transform: scale(0.9); }
+.hp-btn-sm { width: 26px; height: 26px; font-size: 0.8rem; }
+
+/* ============================================================
+   STAT BOX (ability scores)
+   ============================================================ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.stat-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.625rem 0.25rem;
+  text-align: center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.stat-box:hover {
+  border-color: hsl(0, 0%, 40%);
+  box-shadow: var(--shadow-sm);
+}
+.stat-label {
+  font-family: var(--font-heading);
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: hsl(0, 0%, 30%);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  display: block;
+}
+.stat-mod {
+  font-family: var(--font-heading);
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+  display: block;
+  line-height: 1.2;
+}
+.stat-value {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  display: block;
+}
+
+/* ============================================================
+   SKILLS GRID
+   ============================================================ */
+.skills-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+}
+.skill-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.3rem 0.625rem;
+  background: var(--bg-input);
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+.skill-mod {
+  font-weight: 700;
+  color: hsl(0, 0%, 17%);
+  min-width: 2rem;
+  text-align: right;
+  font-family: var(--font-heading);
+}
+
+/* ============================================================
+   COMBAT STATS (player sheet: HP, AC, etc.)
+   ============================================================ */
+.combat-stats {
+  display: flex;
+  gap: 0.875rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+.combat-stat {
+  flex: 1;
+  min-width: 120px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-top: 2px solid hsl(0, 51%, 36%);
+  border-radius: var(--radius);
+  padding: 0.875rem 1rem;
+  text-align: center;
+}
+.combat-stat .label {
+  display: block !important;
+  padding: 0 !important;
+  font-family: var(--font-heading);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: hsl(0, 0%, 30%);
+  font-weight: 700;
+  margin-bottom: 0.25rem;
+  display: block;
+}
+.combat-stat .value {
+  font-family: var(--font-heading);
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--text);
+  display: block;
+}
+
+/* ============================================================
+   ITEM CARDS (spells, equipment on player sheet)
+   ============================================================ */
+.item-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.875rem 1rem;
+  margin-bottom: 0.5rem;
+  transition: box-shadow 0.15s;
+}
+.item-card:hover { box-shadow: var(--shadow-md); }
+.item-card h4 {
+  font-family: var(--font-heading);
+  font-size: 0.95rem;
+  color: hsl(0, 0%, 17%);
+  margin-bottom: 0.25rem;
+}
+.item-card .meta { font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.35rem; }
+.item-card .desc { font-size: 0.9rem; color: var(--text); line-height: 1.5; }
+
+/* ============================================================
+   FEATURES LIST
+   ============================================================ */
+.features-list {
+  list-style: none;
+  padding-left: 0;
+  margin-bottom: 1rem;
+}
+
+/* ============================================================
+   SPELL SLOT BUBBLES (player sheet)
+   ============================================================ */
+.slot-bubble { display: inline-block; cursor: pointer; }
+.slot-bubble input[type="checkbox"] { position: absolute; opacity: 0; width: 0; height: 0; }
+.slot-circle {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  border: 2px solid hsl(0, 0%, 30%);
+  border-radius: 50%;
+  background: transparent;
+  transition: background 0.18s, box-shadow 0.18s;
+  vertical-align: middle;
+}
+.slot-bubble input:checked + .slot-circle {
+  background: hsl(0, 0%, 30%);
+  box-shadow: 0 0 7px hsla(0, 0%, 30%, 0.55);
+}
+
+@media (max-width: 768px) {
+  .slot-circle {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* ============================================================
+   CURRENCY / PURSE
+   ============================================================ */
+.purse-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+.purse-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0.4rem 0.75rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 52px;
+  gap: 0.1rem;
+}
+.purse-item.zero { opacity: 0.4; }
+.purse-amount-val {
+  font-family: var(--font-heading);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.2;
+}
+.purse-abbr {
+  font-family: var(--font-heading);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ============================================================
+   MONSTER STAT BLOCK
+   ============================================================ */
+.stat-block-divider {
+  height: 1px;
+  background: hsl(0, 0%, 40%);
+  margin: 0.625rem 0;
+  opacity: 0.35;
+}
+.stat-block-line { font-size: 0.9rem; margin-bottom: 0.3rem; }
+.stat-block-line strong { color: var(--text); }
+.stat-block-action { font-size: 0.9rem; margin-bottom: 0.625rem; line-height: 1.55; }
+
+/* ============================================================
+   SHOP CUSTOM ITEM EDIT ROW
+   Grid-based so fields stay readable on every viewport.
+   ============================================================ */
+.shop-item-edit-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 90px 90px auto;
+  grid-template-areas:
+    "name  type  price denom actions"
+    "desc  desc  desc  desc  actions";
+  align-items: end;
+  gap: 0.5rem 0.625rem;
+  padding: 0.625rem 0.875rem;
+}
+.shop-item-edit-row .form-group {
+  margin: 0;
+  min-width: 0;
+}
+.shop-item-edit-row .form-group label {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: var(--font-heading);
+  letter-spacing: 0.04em;
+  margin-bottom: 0.2rem;
+}
+.shop-item-edit-row input,
+.shop-item-edit-row select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.shop-edit-name    { grid-area: name; }
+.shop-edit-type    { grid-area: type; }
+.shop-edit-price   { grid-area: price; }
+.shop-edit-denom   { grid-area: denom; }
+.shop-edit-desc    { grid-area: desc; }
+.shop-edit-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: end;
+  padding-bottom: 0.1rem;
+}
+
+@media (max-width: 768px) {
+  .shop-item-edit-row {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "name    name"
+      "type    type"
+      "price   denom"
+      "desc    desc"
+      "actions actions";
+    gap: 0.625rem 0.625rem;
+    padding: 0.75rem 0.875rem;
+  }
+  .shop-item-edit-row .form-group label {
+    font-size: 0.72rem;
+  }
+  .shop-item-edit-row input,
+  .shop-item-edit-row select {
+    font-size: 16px; /* prevent iOS zoom */
+    padding: 0.5rem 0.625rem;
+    min-height: 2.5rem;
+  }
+  .shop-edit-actions {
+    justify-content: flex-end;
+    padding-top: 0.25rem;
+  }
+}
+
+/* ============================================================
+   TOAST (DaisyUI toast with DND styling)
+   ============================================================ */
+.toast {
+  font-family: var(--font-heading);
+  font-size: 0.82rem;
+  letter-spacing: 0.03em;
+  pointer-events: none;
+}
+.toast .alert {
+  font-family: var(--font-heading);
+  font-size: 0.82rem;
+  letter-spacing: 0.03em;
+  padding: 0.625rem 1.125rem;
+  min-height: unset;
+  background-color: hsl(0, 0%, 22%);
+  color: hsl(0, 0%, 95%);
+  border-color: hsl(0, 0%, 35%);
+}
+/* Mobile: center the toast at the top so it's clearly visible above modals
+   and not clipped by safe-area or the keyboard at the bottom of the screen. */
+@media (max-width: 600px) {
+  .toast {
+    top: calc(env(safe-area-inset-top) + 0.75rem) !important;
+    bottom: auto !important;
+    left: 50% !important;
+    right: auto !important;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: calc(100vw - 1.5rem);
+  }
+  .toast .alert {
+    font-size: 0.85rem;
+    padding: 0.7rem 1rem;
+    text-align: center;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* ============================================================
+   DISCONNECT BANNER (player sheet) — DaisyUI alert overrides
+   ============================================================ */
+#disconnect-banner {
+  font-family: var(--font-heading);
+  font-size: 0.85rem;
+  letter-spacing: 0.03em;
+  padding-top: calc(env(safe-area-inset-top) + 8px);
+  padding-bottom: 8px;
+}
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+.empty-state {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+
+/* ============================================================
+   SRD FOOTER
+   ============================================================ */
+.srd-footer {
+  margin-top: 2rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+.srd-footer a { color: hsl(0, 0%, 30%); text-decoration: none; }
+.srd-footer a:hover { color: hsl(0, 0%, 10%); }
+
+/* ============================================================
+   CHAR TITLE (player.js adds .char-title to h1 after claim)
+   ============================================================ */
+.char-title {
+  font-size: 1rem !important;
+  text-align: center;
+  padding: 0.5rem 0 0.25rem;
+  color: var(--text-muted) !important;
+}
+
+/* ============================================================
+   PLAYER PAGE TITLE
+   ============================================================ */
+.player-page-title {
+  font-family: var(--font-heading);
+  color: var(--accent);
+  font-size: 1.5rem;
+  font-weight: 700;
+  text-align: center;
+  padding: 1.25rem 0;
+}
+
+/* ============================================================
+   PLAYER SHEET — Join flow
+   ============================================================ */
+#step-join h2, #step-pick h2 {
+  font-family: var(--font-heading);
+  color: hsl(0, 0%, 17%);
+  margin-bottom: 1rem;
+}
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 768px) {
+  .stat-grid { grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
+  .stat-row { grid-template-columns: repeat(3, 1fr); }
+  .form-row { grid-template-columns: 1fr 1fr; }
+  .form-row-4col { grid-template-columns: 1fr 1fr; }
+  .modal-body { max-height: calc(100dvh - 8rem); }
+  .skills-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+  /* prevent iOS zoom on focus */
+  input, select, textarea { font-size: 16px; }
+  .top-bar-title { display: none; }
+
+  /* Mobile component proportions: rebalance sizes that look oversized
+     when the viewport shrinks but the desktop type scale stays. */
+  .combat-stats { gap: 0.5rem; }
+  .combat-stat {
+    min-width: 0;
+    flex-basis: calc(50% - 0.25rem);
+    padding: 0.625rem 0.5rem;
+  }
+  .combat-stat .value { font-size: 1.4rem; }
+  .combat-stat .label { font-size: 0.62rem; }
+
+  .stat-box { padding: 0.5rem 0.2rem; }
+  .stat-mod { font-size: 1.2rem; }
+  .stat-value { font-size: 0.72rem; }
+  .stat-label { font-size: 0.62rem; }
+
+  .char-item { padding: 0.7rem 0.75rem; gap: 0.5rem; }
+  .char-name { font-size: 0.95rem; }
+  .char-meta { font-size: 0.78rem; }
+
+  .bf-card { padding: 0.7rem 0.75rem; }
+  .bf-name { font-size: 0.95rem; }
+  .bf-hp-text { font-size: 0.82rem; min-width: 60px; }
+  .bf-hp-bar-container { height: 12px; }
+
+  .item-card { padding: 0.7rem 0.875rem; }
+  .item-card h4 { font-size: 0.92rem; }
+
+  .hp-btn { width: 34px; height: 34px; font-size: 1rem; }
+  .hp-btn-sm { width: 28px; height: 28px; }
+
+  /* Tabs: keep readable on phones — slightly larger than the 480px override
+     and snug single-row scrolling instead of wrapping pills. */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    font-size: 0.78rem !important;
+    padding: 0.4rem 0.85rem !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .container { padding: 0.5rem 0.75rem 1.5rem; }
+  .stat-row { grid-template-columns: repeat(3, 1fr); }
+  .form-row { grid-template-columns: 1fr; }
+  .form-row-4col { grid-template-columns: 1fr 1fr; }
+  .modal-box {
+    border-radius: var(--radius) var(--radius) 0 0 !important;
+    max-height: 95dvh;
+    /* Override any inline/utility max-width caps (e.g. style="max-width:760px"
+       or `max-w-5xl`) so modals always fill the viewport on phones. */
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  .modal-body {
+    max-height: calc(95dvh - 6rem);
+    padding: 0.75rem 0.875rem;
+  }
+  /* Search-result lists embedded directly in a modal body should not have
+     their own scroll on mobile — let the modal body be the single scroll
+     container so we don't get nested scroll regions. */
+  .modal-body > .modal-results {
+    max-height: none !important;
+  }
+  /* More breathing room inside collapsibles on small screens */
+  .char-form-collapse .collapse-content {
+    padding: 0.75rem 0.75rem 1rem;
+  }
+  /* Collapsible header touch target */
+  .char-form-collapse .collapse-title {
+    min-height: 52px;
+    font-size: 1rem;
+  }
+  /* Skills: single column so names don't wrap or get clipped */
+  .skill-check-grid {
+    grid-template-columns: 1fr;
+  }
+  /* Saving throws: 2 columns fits better on narrow phones */
+  .save-check-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  /* Equipment row: Name spans full width, Type + Qty + Remove on next row */
+  .eq-item-grid {
+    grid-template-columns: 1fr 56px auto;
+  }
+  .eq-item-grid > .form-group:first-child {
+    grid-column: 1 / -1;
+  }
+  .navbar { gap: 0.5rem; padding-left: 0.625rem; padding-right: 0.625rem; }
+  /* Reduce DaisyUI card-body padding on mobile */
+  .card-body { padding: 0.75rem !important; }
+
+  /* Cards sit flush to the gutter and lose hover lift effects that don't
+     apply on touch devices. Border-radius unifies with the smaller padding. */
+  .card { border-radius: 0.5rem; }
+  #shops-list > .card { padding: 0.7rem 0.75rem; }
+  .currency-row { gap: 0.35rem; }
+  .currency-row .form-group label { font-size: 0.65rem; }
+
+  /* Player join/pick cards align with the new container padding */
+  #step-join .card-body, #step-pick .card-body { padding: 0.875rem !important; }
+
+  .player-page-title { font-size: 1.25rem; padding: 0.75rem 0; }
+
+  /* Sidebar slightly narrower so it does not eat the whole viewport */
+  .menu-sidebar { width: 17.5rem !important; }
+  .sidebar-section { padding: 0.875rem 1rem; }
+  .sidebar-header { padding: 0.875rem 1rem; }
+}
+
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: repeat(3, 1fr); gap: 0.35rem; }
+  .combat-stat { padding: 0.5rem 0.5rem; }
+  .combat-stat .value { font-size: 1.25rem; }
+  .item-card .meta { font-size: 0.78rem; }
+  .item-card .desc { font-size: 0.86rem; }
+  /* Tighter tab pills on the smallest phones to keep them readable on one row */
+  .tabs { gap: 0.2rem; padding: 0.3rem 0.35rem; }
+  .tab {
+    font-size: 0.72rem !important;
+    padding: 0.32rem 0.6rem !important;
+    letter-spacing: 0.02em !important;
+  }
+}
+
+/* ============================================================
+   NOTES TEXTAREA
+   ============================================================ */
+#notes-editor {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  resize: vertical;
+  line-height: 1.6;
+  min-height: max(500px, calc(100dvh - 280px));
+}
+
+/* ============================================================
+   MODAL CLOSE BUTTON — consistent × across all modals
+   ============================================================ */
+.modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+.modal-close:hover {
+  background: hsl(0, 0%, 90%);
+  color: var(--text);
+}
+
+/* ============================================================
+   ABILITY METHOD BAR — active state
+   ============================================================ */
+.ability-method-btn.active {
+  background: hsl(0, 0%, 25%) !important;
+  color: #fff !important;
+  border-color: hsl(0, 0%, 18%) !important;
+}
+
+/* ============================================================
+   LEVEL UP MODAL
+   ============================================================ */
+#levelup-modal .modal-box { max-width: 600px; }
+
+/* safe-area insets for notched phones */
+@supports (padding: env(safe-area-inset-top)) {
+  .navbar { padding-top: max(0.5rem, env(safe-area-inset-top)); }
+}
+
+/* ============================================================
+   MOBILE SEARCH MODAL
+   ============================================================ */
+.mobile-search-modal .modal-box,
+.mobile-search-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100% !important;
+  height: 100dvh;
+  max-height: 100dvh !important;
+  border-radius: 0 !important;
+  margin: 0;
+  padding: 0;
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.mobile-search-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-dark);
+  flex-shrink: 0;
+}
+
+.mobile-search-header .input {
+  font-size: 16px;
+  font-family: var(--font-body);
+  background: var(--bg-card);
+  color: var(--text);
+  border-color: var(--border-dark);
+}
+
+.mobile-search-filters {
+  padding: 0.625rem 0.75rem;
+  background: var(--bg-dark);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.mobile-filter-row {
+  display: flex;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.mobile-search-results {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+@media (min-width: 769px) {
+  .mobile-search-modal { display: none !important; }
+}

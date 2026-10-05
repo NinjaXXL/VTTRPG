@@ -1,0 +1,4 @@
+interface:
+  display_name: "Static Companion Development"
+  short_description: "Maintain the 5.5e Companion static app safely."
+  default_prompt: "Update 5.5e Companion while preserving static hosting, IndexedDB data, and player-session compatibility."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Static Companion"
+  short_description: "Prepare and ship verified 5.5e Companion releases."
+  default_prompt: "Prepare a release for 5.5e Companion, run all checks, and follow the GitHub Pages release workflow."

@@ -1,8 +1,17 @@
 // VTTRPG skeleton: DM-hosted, browser-only, WebRTC via PeerJS.
-// The DM's browser is the authority. Players only talk to the DM (chat is relayed by the DM).
+// Session behaviour is modelled on the 5.5e-companion reference (js/peer.js):
+//  - DM = host with a STABLE room id (peer id "vttrpg-<roomId>") on the PeerJS cloud; the link never changes, a PIN guards each session
+//  - DM re-claims its id when the signaling connection drops, retries when the id is still held (page refresh)
+//  - players connect with a 10 s timeout and retry with exponential backoff (1 s .. 30 s), also on tab-visible / network-online
+//  - players ping every 30 s, the DM answers and drops connections silent for 60 s
+// On top of that the skeleton adds: approval lobby, numbered players, kick/ban, chat with history, export/import.
 
-const APP_VERSION = '0.5.1';
-const PEERJS_VERSION = '1.5.5';
+const APP_VERSION = '0.6.0';
+const PEERJS_VERSION = '1.5.5';                   // loaded by index.html
+
+const PEER_PREFIX = 'vttrpg-';
+const STALE_MS = 60000, STALE_CHECK_MS = 15000, HEARTBEAT_MS = 30000;
+const CONNECT_TIMEOUT_MS = 10000, RECONNECT_BASE_MS = 1000, RECONNECT_MAX_MS = 30000, JOIN_REPLY_TIMEOUT_MS = 8000;
 
 // ---------- global diagnostics: forward warnings/errors/online state into the visible log ----------
 let activeLog = null;                              // set by the current view's log()
@@ -45,7 +54,7 @@ if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
       this.addEventListener('icecandidateerror', e => L(`ICE candidate error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
       this.addEventListener('iceconnectionstatechange', () => {
         L(`ice=${this.iceConnectionState}`);
-        if (this.iceConnectionState === 'checking') [3000, 8000, 12000].forEach(t => setTimeout(() => { if (this.iceConnectionState === 'checking') summarize(`in-flight @${t / 1000}s`); }, t));
+        if (this.iceConnectionState === 'checking') [3000, 8000].forEach(t => setTimeout(() => { if (this.iceConnectionState === 'checking') summarize(`in-flight @${t / 1000}s`); }, t));
       });
       this.addEventListener('connectionstatechange', () => {
         L(`conn=${this.connectionState}`);
@@ -70,7 +79,7 @@ if (window.RTCPeerConnection && !window.__vttrpgPcPatched) {
 const footer = document.getElementById('version');
 if (footer) footer.textContent = `VTTRPG skeleton v${APP_VERSION} · PeerJS ${PEERJS_VERSION}`;
 
-const short = id => String(id).slice(0, 6);
+const short = id => String(id).slice(0, 8);
 
 // Optional TURN relay + relay-only test flag travel in the join link (URL hash, never sent to a server)
 const b64e = o => btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -85,62 +94,221 @@ const parseOpts = q => {
   return { turn, relayOnly: p.get('r') === '1' };
 };
 
-// PeerJS transport. The public cloud only introduces the browsers; campaign traffic stays on WebRTC data channels.
-async function connectPeer(roomId, { log, onJoin, onLeave, onMessage, host = false, turn = null, relayOnly = false }) {
-  if (!window.Peer) throw new Error('PeerJS could not be loaded. Check the network connection and reload.');
-  const connections = new Map(); let sent = 0, received = 0, leaving = false, lastIce = 'n/a';
-  // Same defaults as PeerJS 1.5.5 (Google STUN + PeerJS shared TURN), plus Cloudflare STUN and an optional custom TURN from the DM.
+// ---------- networking: PeerJS transport (behaviour copied from the reference repo) ----------
+// Default = exactly the reference setup (PeerJS defaults: cloud signaling, Google STUN + PeerJS shared TURN).
+// Only when the DM adds a TURN server or ticks the relay test do we pass an explicit ICE configuration.
+function peerOptions({ turn, relayOnly, log }) {
+  if (!turn && !relayOnly) { log('ICE servers: PeerJS defaults (Google STUN + PeerJS shared TURN eu-0/us-0)'); return {}; }
   const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
     { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
   ];
   if (turn) iceServers.push(turn);
-  log(`ICE servers: Google/Cloudflare STUN, PeerJS shared TURN (eu-0, us-0)${turn ? ', custom TURN ' + turn.urls.join(',') : ''}${relayOnly ? ' | RELAY-ONLY test mode (direct paths disabled)' : ''}`);
-  log(`browser: ${navigator.userAgent}`);
-  const peer = new window.Peer(host ? roomId : undefined, { debug: 0, config: { iceServers, sdpSemantics: 'unified-plan', ...(relayOnly ? { iceTransportPolicy: 'relay' } : {}) } });
-  const waitForPeer = () => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Timed out while registering the browser connection.')), 20000);
-    peer.once('open', id => { clearTimeout(timer); resolve(id); });
-    peer.once('error', error => { clearTimeout(timer); reject(error); });
-  });
-  const bind = connection => {
-    const pid = connection.peer;
-    connection.on('open', () => { connections.set(pid, connection); log(`WebRTC data channel open: ${short(pid)}`); onJoin(pid); });
-    connection.on('data', data => { received++; log(`← ${short(pid)} ${data?.t ?? typeof data}`); onMessage(data, pid); });
-    connection.on('close', () => { if (connections.delete(pid)) { log(`peer left: ${short(pid)}`); onLeave(pid); } });
-    connection.on('error', error => log(`connection error ${short(pid)}: ${error?.type || ''} ${safeStr(error)}`));
-    connection.on('iceStateChanged', s => { lastIce = s; log(`${short(pid)} PeerJS ICE state: ${s}`); });
+  log(`ICE servers: Google STUN, PeerJS shared TURN${turn ? ', custom TURN ' + turn.urls.join(',') : ''}${relayOnly ? ' | RELAY-ONLY test (direct paths disabled)' : ''}`);
+  return { config: { iceServers, sdpSemantics: 'unified-plan', ...(relayOnly ? { iceTransportPolicy: 'relay' } : {}) } };
+}
+
+// DM side: registers "vttrpg-<roomId>" at the PeerJS cloud and accepts player data channels.
+function createDMPeer(roomId, { log, turn, relayOnly, onPlayerConnect, onPlayerDisconnect, onMessage, onSignaling }) {
+  const peerId = PEER_PREFIX + roomId;
+  const connections = new Map();                   // playerPeerId -> { conn, lastActivity }
+  const opts = peerOptions({ turn, relayOnly, log });
+  let peer = null, destroyed = false, opened = false, staleTimer = null, sigTimer = null, sigAttempt = 0, sent = 0, received = 0;
+
+  function init() { return new Promise((resolve, reject) => tryInit(resolve, reject, 0)); }
+
+  function tryInit(resolve, reject, attempt) {
+    log(`registering ${peerId} at the PeerJS cloud (attempt ${attempt + 1})…`);
+    opened = false;
+    peer = new window.Peer(peerId, { debug: 0, ...opts });
+    peer.on('open', id => {
+      if (!opened) { opened = true; log(`PeerJS signaling connected as ${id}`); resolve(id); }
+      else { sigAttempt = 0; clearTimeout(sigTimer); sigTimer = null; log('signaling connection re-established (id reclaimed)'); onSignaling('connected'); }
+    });
+    peer.on('error', err => {
+      if (destroyed) return;
+      log(`PeerJS error (${err?.type || 'unknown'}): ${safeStr(err)}`);
+      if (!opened) {
+        if (err?.type === 'unavailable-id' && attempt < 3) {          // the cloud may still hold the id after a page refresh
+          const delay = 2000 * (attempt + 1);
+          log(`id still held by the signaling server, retrying in ${delay} ms (attempt ${attempt + 1}/3)…`);
+          peer.destroy(); setTimeout(() => { if (!destroyed) tryInit(resolve, reject, attempt + 1); }, delay);
+        } else reject(new Error(err?.type === 'unavailable-id' ? 'Session ID is still held by another connection. Wait a moment and try again.' : 'Connection error: ' + (err?.type || safeStr(err))));
+      } else if (peer.disconnected) scheduleSignalingReconnect();
+    });
+    peer.on('disconnected', () => { if (!destroyed && opened) scheduleSignalingReconnect(); });
+    peer.on('connection', handleIncoming);
+  }
+
+  function scheduleSignalingReconnect() {          // keep the DM id alive on the signaling server
+    if (destroyed || sigTimer) return;
+    const delay = Math.min(1000 * 2 ** sigAttempt, RECONNECT_MAX_MS); sigAttempt++;
+    log(`signaling connection lost – reclaiming the id in ${delay} ms (attempt ${sigAttempt}); new players cannot find the DM meanwhile`);
+    onSignaling('reconnecting');
+    sigTimer = setTimeout(() => {
+      sigTimer = null;
+      if (destroyed || !peer || peer.destroyed) return;
+      if (peer.disconnected) { try { peer.reconnect(); } catch (e) { log('reconnect failed: ' + e.message); } }
+    }, delay);
+  }
+
+  function handleIncoming(conn) {
+    const pid = conn.peer;
+    log(`incoming connection from ${short(pid)} (negotiating…)`);
+    conn.on('iceStateChanged', s => log(`${short(pid)} PeerJS ICE state: ${s}`));
+    conn.on('open', () => {
+      connections.set(pid, { conn, lastActivity: Date.now() });
+      log(`data channel open: ${short(pid)}`);
+      ensureStaleCheck(); onPlayerConnect(pid);
+    });
+    conn.on('data', data => {
+      const e = connections.get(pid); if (e && e.conn === conn) e.lastActivity = Date.now();
+      received++;
+      if (data && data.t === 'ping') { try { conn.send({ t: 'pong', ts: data.ts }); } catch { } return; }   // keep-alive, as in the reference
+      log(`← ${short(pid)} ${data?.t ?? typeof data}`);
+      onMessage(data, pid);
+    });
+    const drop = reason => {
+      const e = connections.get(pid);
+      if (!e || e.conn !== conn) return;           // a newer connection of the same player replaced this one
+      connections.delete(pid); log(`player ${short(pid)} gone (${reason})`); onPlayerDisconnect(pid);
+    };
+    conn.on('close', () => drop('closed'));
+    conn.on('error', err => { log(`connection error ${short(pid)}: ${err?.type || ''} ${safeStr(err)}`); drop('error'); });
+  }
+
+  function ensureStaleCheck() {                    // drop connections that went silent (phone backgrounded, WebRTC died quietly)
+    if (staleTimer) return;
+    staleTimer = setInterval(() => {
+      if (destroyed) { clearInterval(staleTimer); staleTimer = null; return; }
+      const now = Date.now();
+      for (const [pid, e] of connections) {
+        if (now - e.lastActivity > STALE_MS) {
+          log(`stale connection ${short(pid)} (silent for ${Math.round((now - e.lastActivity) / 1000)} s) – dropping`);
+          connections.delete(pid); try { e.conn.close(); } catch { } onPlayerDisconnect(pid);
+        }
+      }
+      if (!connections.size) { clearInterval(staleTimer); staleTimer = null; }
+    }, STALE_CHECK_MS);
+  }
+
+  return {
+    init,
+    send(data, target) {                           // target = one player's peer id, or everybody
+      const list = target ? [[target, connections.get(target)]] : [...connections];
+      for (const [pid, e] of list) if (e?.conn?.open) { try { e.conn.send(data); sent++; log(`→ ${short(pid)} ${data?.t ?? typeof data}`); } catch (err) { log('send failed: ' + err.message); } }
+    },
+    close(pid) { const e = connections.get(pid); if (e) { connections.delete(pid); try { e.conn.close(); } catch { } } },
+    isConnected: () => !!peer && !peer.disconnected && !peer.destroyed,
+    status() { log(`DM peer ${peerId}: signaling ${peer?.disconnected ? 'DISCONNECTED' : peer?.destroyed ? 'destroyed' : 'connected'} | players connected=${connections.size} | messages sent=${sent} received=${received}`); },
+    destroy() {
+      destroyed = true; clearInterval(staleTimer); clearTimeout(sigTimer); staleTimer = sigTimer = null;
+      try { peer?.destroy(); } catch { } peer = null; connections.clear(); log('DM peer destroyed (id released)');
+    },
   };
-  peer.on('connection', bind);
-  peer.on('error', error => { if (!leaving) log(`PeerJS error (${error?.type || 'unknown'}): ` + safeStr(error)); });
-  peer.on('disconnected', () => { if (!leaving) log('lost the connection to the PeerJS signaling server'); });
-  const ownId = await waitForPeer();
-  log(`PeerJS ready as ${short(ownId)}${host ? ' (DM host)' : ' (Player)'}`);
-  if (!host) {
-    const connection = peer.connect(roomId, { reliable: true, serialization: 'json' });
-    bind(connection);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`The DM did not answer within 25 s (last ICE state: ${lastIce}). Is the session still open? If ICE failed, the networks cannot connect directly: try a TURN server.`)), 25000);
-      connection.once('open', () => { clearTimeout(timer); resolve(); });
-      connection.once('error', error => { clearTimeout(timer); reject(error); });
+}
+
+// Player side: one data channel to the DM, with timeout, backoff retries and heartbeat.
+function createPlayerPeer(roomId, { log, turn, relayOnly, onConnect, onDisconnect, onReconnecting, onMessage }) {
+  const hostId = PEER_PREFIX + roomId;
+  const opts = peerOptions({ turn, relayOnly, log });
+  let peer = null, conn = null, destroyed = false, reconnectAttempt = 0, reconnectTimer = null, attemptTimer = null, heartbeat = null;
+  let connectNo = 0, lastIce = 'n/a', sent = 0, received = 0;
+
+  function start() { destroyed = false; createPeer(); }
+
+  function createPeer() {
+    if (peer && !peer.destroyed) peer.destroy();
+    log('registering at the PeerJS cloud…');
+    peer = new window.Peer(undefined, { debug: 0, ...opts });
+    peer.on('open', id => { log(`PeerJS signaling connected as ${short(id)}`); if (!conn?.open) openConnection(); });
+    peer.on('disconnected', () => {
+      if (destroyed) return;
+      log('lost the PeerJS signaling connection – reconnecting in 1 s');
+      setTimeout(() => { if (!destroyed && peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 1000);
+    });
+    peer.on('error', err => {
+      if (destroyed) return;
+      log(`PeerJS error (${err?.type || 'unknown'}): ${safeStr(err)}${err?.type === 'peer-unavailable' ? '  -> the DM is not registered (session closed, or DM lost its signaling connection)' : ''}`);
+      scheduleReconnect();
+    });
+    peer.on('connection', c => { log(`refused incoming connection from ${short(c.peer)} (players only talk to the DM)`); c.on('open', () => c.close()); });
+  }
+
+  function openConnection() {
+    if (destroyed || !peer || peer.destroyed) return;
+    if (conn) { const old = conn; conn = null; try { old.close(); } catch { } }
+    const no = ++connectNo;
+    log(`connecting to the DM (attempt ${no}, ${CONNECT_TIMEOUT_MS / 1000} s timeout)…`);
+    const c = peer.connect(hostId, { reliable: true });
+    conn = c; let opened = false;
+    clearTimeout(attemptTimer);
+    attemptTimer = setTimeout(() => {
+      if (opened || destroyed || conn !== c) return;
+      log(`attempt ${no} timed out (last ICE state: ${lastIce})`);
+      try { c.close(); } catch { }
+      scheduleReconnect();
+    }, CONNECT_TIMEOUT_MS);
+    c.on('iceStateChanged', s => { lastIce = s; log(`PeerJS ICE state: ${s}`); });
+    c.on('open', () => {
+      opened = true; clearTimeout(attemptTimer); reconnectAttempt = 0;
+      log(`data channel to the DM open (attempt ${no})`); startHeartbeat(); onConnect();
+    });
+    c.on('data', data => {
+      received++;
+      if (data && data.t === 'pong') return;
+      log(`← DM ${data?.t ?? typeof data}`); onMessage(data);
+    });
+    c.on('close', () => {
+      clearTimeout(attemptTimer);
+      if (conn !== c || destroyed) return;
+      stopHeartbeat(); log('data channel to the DM closed');
+      if (opened) onDisconnect();
+      scheduleReconnect();
+    });
+    c.on('error', err => {
+      clearTimeout(attemptTimer);
+      if (conn !== c || destroyed) return;
+      stopHeartbeat(); log(`connection error: ${err?.type || ''} ${safeStr(err)}`);
+      if (opened) onDisconnect();
+      scheduleReconnect();
     });
   }
+
+  function scheduleReconnect() {
+    if (destroyed || reconnectTimer) return;
+    clearTimeout(attemptTimer);
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempt, RECONNECT_MAX_MS); reconnectAttempt++;
+    log(`retry ${reconnectAttempt} in ${delay} ms`); onReconnecting(reconnectAttempt, delay);
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; if (!destroyed) doReconnect(); }, delay);
+  }
+
+  function doReconnect() {
+    if (destroyed) return;
+    if (!peer || peer.destroyed) createPeer();
+    else if (peer.disconnected) { log('reconnecting to the signaling server first…'); peer.reconnect(); }
+    else openConnection();
+  }
+
+  function cancelReconnect() { clearTimeout(reconnectTimer); reconnectTimer = null; reconnectAttempt = 0; }
+  function startHeartbeat() { stopHeartbeat(); heartbeat = setInterval(() => { if (conn?.open) { try { conn.send({ t: 'ping', ts: Date.now() }); } catch { } } }, HEARTBEAT_MS); }
+  function stopHeartbeat() { clearInterval(heartbeat); heartbeat = null; }
+
   return {
-    send(data, target) {
-      const targets = target ? [connections.get(target)] : [...connections.values()];
-      for (const connection of targets) if (connection?.open) { sent++; log(`→ ${short(connection.peer)} ${data?.t ?? typeof data}`); connection.send(data); }
-    },
-    status() { log(`PeerJS host=${short(ownId)} | peers=${connections.size} | messages sent=${sent} received=${received}`); },
-    leave() { leaving = true; connections.clear(); peer.destroy(); },
+    start,
+    isConnected: () => !!(conn && conn.open),
+    send(data) { if (conn?.open) { conn.send(data); sent++; log(`→ DM ${data?.t ?? typeof data}`); } else log(`not sent (no connection to the DM): ${data?.t}`); },
+    reconnectNow(why) { if (destroyed || (conn && conn.open)) return; log(`reconnecting now (${why})`); cancelReconnect(); clearTimeout(attemptTimer); doReconnect(); },
+    status() { log(`player peer: signaling ${peer?.disconnected ? 'DISCONNECTED' : peer?.destroyed ? 'destroyed' : peer ? 'connected' : 'none'} | DM channel ${conn?.open ? 'open' : 'closed'} | attempts=${connectNo} | messages sent=${sent} received=${received}`); },
+    destroy() { destroyed = true; cancelReconnect(); clearTimeout(attemptTimer); stopHeartbeat(); try { peer?.destroy(); } catch { } peer = null; conn = null; },
   };
 }
 
 // ---------- constants & helpers ----------
 const LS_CAMPAIGNS = 'vttrpg:campaigns';       // DM side: all campaigns (localStorage for the skeleton)
 const LS_NAME = 'vttrpg:playerName';           // player side: last used name
-const LS_TOKEN = 'vttrpg:playerToken';         // player side: one small persistent secret ID
-const JOIN_TIMEOUT_MS = 25000;
-const LS_TURN = 'vttrpg:turn';               // DM side: optional TURN relay settings
+const SS_TOKEN = 'vttrpg:playerToken';         // player side: per-TAB identity so several tabs can be tested on one computer
+const LS_TURN = 'vttrpg:turn';                 // DM side: optional TURN relay settings
 
 const rid = (n = 12) => {
   const a = new Uint8Array(n); crypto.getRandomValues(a);
@@ -167,7 +335,7 @@ function saveCampaign(c) {
 function deleteCampaign(id) { const all = loadAll(); delete all[id]; localStorage.setItem(LS_CAMPAIGNS, JSON.stringify(all)); }
 
 // ---------- small UI parts ----------
-// Log box with toolbar: copy / clear / (optional) "log status now"
+// Log box with toolbar: copy / clear / "log status now"
 function makeLog(role, onStatus) {
   const pre = h('pre', { class: 'log' });
   const log = s => {
@@ -180,6 +348,8 @@ function makeLog(role, onStatus) {
     h('button', { onclick: () => { pre.textContent = ''; } }, 'Clear'));
   activeLog = log;
   log(`VTTRPG v${APP_VERSION} ${role} view started; page ${location.pathname}`);
+  log(`env: online=${navigator.onLine} secureContext=${isSecureContext} RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'} PeerJS=${window.Peer ? 'loaded' : 'MISSING'}`);
+  log(`browser: ${navigator.userAgent}`);
   return { el: h('div', {}, toolbar, pre), log };
 }
 
@@ -213,7 +383,7 @@ function route() {
   $app.replaceChildren();
   const [hash, query = ''] = (location.hash.replace(/^#/, '') || '/').split('?');
   let m;
-  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)$/))) return viewPlayer(m[1], m[2], parseOpts(query));
+  if ((m = hash.match(/^\/join\/([a-z0-9]+)$/))) return viewPlayer(m[1], parseOpts(query));
   if ((m = hash.match(/^\/dm\/([a-z0-9]+)$/))) return viewDM(m[1]);
   viewHome();
 }
@@ -255,7 +425,7 @@ function viewHome() {
     h('section', {}, h('h2', {}, 'Create campaign (you become the DM)'), h('div', { class: 'row' }, nameIn, h('button', { onclick: create }, 'Create'))),
     h('section', {}, h('h2', {}, 'Your campaigns (stored in this browser only)'), listEl,
       h('div', { class: 'muted' }, 'Import a campaign file: '), fileIn),
-    h('section', { class: 'muted' }, 'Players: you do not need anything here. Just open the join link the DM sent you.')
+    h('section', { class: 'muted' }, 'Players: you do not need anything here. Open the join link the DM sent you and enter the PIN.')
   );
 }
 
@@ -264,20 +434,23 @@ function viewDM(cid) {
   const camp = loadAll()[cid];
   if (!camp) { location.hash = '#/'; return; }
   const save = () => saveCampaign(camp);
-  const { el: logEl, log } = makeLog('DM', () => conn ? conn.status() : log('no active session'));
+  const { el: logEl, log } = makeLog('DM', () => dmPeer ? dmPeer.status() : log('no active session'));
   log(`campaign "${camp.name}" (${cid}) loaded from localStorage: ${Object.keys(camp.players).length} known players, ${camp.chat.length} chat messages`);
   const chat = makeChat(text => postChat({ from: 'DM', text }));
   camp.chat.slice(-100).forEach(chat.add);
 
-  let conn = null, session = null, opening = false;
-  const peers = new Map(); // peerId -> {token, name, status:'pending'|'approved', num}
+  let dmPeer = null, session = null, opening = false;
+  const peers = new Map();       // playerPeerId -> {token, name, status:'pending'|'approved', num}
+  const badPins = new Map();     // playerPeerId -> wrong PIN count
 
-  const modeSel = h('select', { onchange: () => { if (session) { session.mode = modeSel.value; } log('join mode -> ' + modeSel.value); } },
+  const modeSel = h('select', { onchange: () => { if (session) session.mode = modeSel.value; log('join mode -> ' + modeSel.value); } },
     h('option', { value: 'approval' }, 'Approval required'),
     h('option', { value: 'open' }, 'Open (auto-approve)'),
     h('option', { value: 'locked' }, 'Locked (only known players)'));
+  const pinIn = h('input', { value: camp.pin || rid(4).toUpperCase(), maxlength: '12', size: '8', title: '3-12 letters or digits' });
   const toggleBtn = h('button', { onclick: () => session ? closeSession() : openSession() }, 'Open session');
-  const linkIn = h('input', { readonly: '', placeholder: 'Open the session to get a link' });
+  const sigEl = h('span', { class: 'tag' }, 'no session');
+  const linkIn = h('input', { readonly: '', placeholder: 'Open the session to see the link (it stays the same for this campaign)' });
   const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); log('join link copied'); } }, 'Copy link');
   const lobbyEl = h('div'), playersEl = h('div');
   const qrEl = h('div');
@@ -293,7 +466,7 @@ function viewDM(cid) {
   };
   chat.setEnabled(false);
 
-  const sendTo = (data, pid) => conn?.send(data, pid);
+  const sendTo = (data, pid) => dmPeer?.send(data, pid);
   const approvedPids = () => [...peers].filter(([, p]) => p.status === 'approved').map(([pid]) => pid);
   const isOnline = tok => [...peers.values()].some(p => p.token === tok && p.status === 'approved');
   const roster = () => Object.values(camp.players).filter(p => !p.banned)
@@ -301,47 +474,50 @@ function viewDM(cid) {
   const broadcastRoster = () => approvedPids().forEach(pid => sendTo({ t: 'roster', roster: roster() }, pid));
 
   async function openSession() {
-    if (opening) return;
-    opening = true; toggleBtn.disabled = true;
-    const s = { id: rid(20), secret: rid(24), mode: modeSel.value };
+    if (opening || session) return;
+    const pin = pinIn.value.trim();
+    if (!/^[a-zA-Z0-9]{3,12}$/.test(pin)) { alert('The PIN must be 3 to 12 letters or digits.'); return; }
+    opening = true; toggleBtn.disabled = true; sigEl.textContent = 'connecting…';
+    if (!camp.roomId) { camp.roomId = rid(14); log('created a permanent room id for this campaign: ' + camp.roomId); }
+    camp.pin = pin; save();
     const turn = readTurn(), relayOnly = relayChk.checked;
-    log(`opening PeerJS session: mode=${s.mode}, host=${short(s.id)}`);
-    try {
-      conn = await connectPeer(s.id, {
-        log, host: true, turn, relayOnly,
-        onJoin: pid => log('peer connected ' + short(pid) + ' – waiting for its join request'),
-        onLeave: pid => {
-          const p = peers.get(pid);
-          if (p) { log(`${p.name} (${p.status}) left`); peers.delete(pid); if (p.status === 'approved') systemMsg(`${p.name} (Player ${p.num}) disconnected`); renderPeople(); broadcastRoster(); }
-          else log(`peer ${short(pid)} left (had not sent a join request)`);
-        },
-        onMessage: (m, pid) => onMsg(m, pid),
-      });
-    } catch (e) {
-      log('COULD NOT OPEN SESSION: ' + e.message); opening = false; toggleBtn.disabled = false; return;
-    }
-    session = s; opening = false; toggleBtn.disabled = false;
+    log(`opening session: mode=${modeSel.value}, room=${camp.roomId}, PIN set`);
+    const p = createDMPeer(camp.roomId, {
+      log, turn, relayOnly,
+      onPlayerConnect: pid => log('player connected ' + short(pid) + ' – waiting for its join request'),
+      onPlayerDisconnect: pid => {
+        badPins.delete(pid);
+        const pl = peers.get(pid);
+        if (pl) { log(`${pl.name} (${pl.status}) left`); peers.delete(pid); if (pl.status === 'approved') systemMsg(`${pl.name} (Player ${pl.num}) disconnected`); renderPeople(); broadcastRoster(); }
+        else log(`peer ${short(pid)} left (had not been admitted)`);
+      },
+      onMessage: (m, pid) => onMsg(m, pid),
+      onSignaling: s => { sigEl.textContent = s === 'connected' ? 'signaling OK' : 'signaling lost, reconnecting…'; },
+    });
+    try { await p.init(); }
+    catch (e) { log('COULD NOT OPEN SESSION: ' + e.message); p.destroy(); opening = false; toggleBtn.disabled = false; sigEl.textContent = 'failed'; return; }
+    dmPeer = p; session = { pin, mode: modeSel.value }; opening = false; toggleBtn.disabled = false; pinIn.disabled = true;
     const qs = [turn ? 't=' + b64e(turn) : '', relayOnly ? 'r=1' : ''].filter(Boolean).join('&');
-    linkIn.value = `${location.origin}${location.pathname}#/join/${s.id}.${s.secret}${qs ? '?' + qs : ''}`;
+    linkIn.value = `${location.origin}${location.pathname}#/join/${camp.roomId}${qs ? '?' + qs : ''}`;
     if (turn) log('join link includes the custom TURN settings (anyone with the link can use that TURN account)');
     if (relayOnly) log('RELAY-ONLY test mode is on: both sides must connect through a TURN server');
     qrEl.replaceChildren();
     if (window.QRCode) new window.QRCode(qrEl, { text: linkIn.value, width: 220, height: 220 });
     else qrEl.append('QR code library could not be loaded. Use the link instead.');
-    toggleBtn.textContent = 'Close session'; chat.setEnabled(true);
-    log('SESSION OPEN – share the link; waiting for players. Room ' + short(s.id));
+    sigEl.textContent = 'signaling OK'; toggleBtn.textContent = 'Close session'; chat.setEnabled(true);
+    log(`SESSION OPEN – players need the link and the PIN "${pin}". Waiting for players.`);
     renderPeople();
   }
 
   function closeSession() {
     if (!session) return;
-    log(`closing session; notifying ${peers.size} connected peer(s)`);
+    log(`closing session; notifying ${peers.size} connected player(s)`);
     [...peers.keys()].forEach(pid => sendTo({ t: 'closed' }, pid));
-    const c = conn; setTimeout(() => c?.leave(), 400); // let 'closed' go out first
-    peers.clear(); session = null; conn = null;
-    linkIn.value = ''; toggleBtn.textContent = 'Open session'; chat.setEnabled(false);
+    const p = dmPeer; setTimeout(() => p?.destroy(), 400); // let 'closed' go out first
+    peers.clear(); badPins.clear(); session = null; dmPeer = null; pinIn.disabled = false;
+    linkIn.value = ''; toggleBtn.textContent = 'Open session'; chat.setEnabled(false); sigEl.textContent = 'no session';
     qrEl.replaceChildren();
-    log('session closed (old link is now dead)'); renderPeople();
+    log('session closed (the link stays the same; reopening the session lets players reconnect automatically)'); renderPeople();
   }
 
   function onMsg(m, pid) {
@@ -352,25 +528,34 @@ function viewDM(cid) {
     if (!p || p.status !== 'approved') { log(`ignored ${m.t} from ${short(pid)}: not an approved player`); return; }
     if (m.t === 'chat') {
       const text = String(m.text || '').trim().slice(0, 500);
-      if (text) { log(`chat from Player ${p.num}, relaying to ${approvedPids().length} peer(s)`); postChat({ from: `${p.name} (P${p.num})`, text }); }
+      if (text) { log(`chat from Player ${p.num}, relaying to ${approvedPids().length} player(s)`); postChat({ from: `${p.name} (P${p.num})`, text }); }
     } else log(`ignored unknown message type "${m.t}" from Player ${p.num}`);
   }
 
   function handleJoin(m, pid) {
-    if (m.secret !== session.secret) { log(`join request from ${short(pid)} with an invalid invite secret – ignored`); return; }
+    if (String(m.pin) !== session.pin) {
+      const n = (badPins.get(pid) || 0) + 1; badPins.set(pid, n);
+      log(`join request from ${short(pid)} with a WRONG PIN (${n}/5)`);
+      sendTo({ t: 'badpin' }, pid);
+      if (n >= 5) { log('too many wrong PINs – closing that connection'); setTimeout(() => dmPeer?.close(pid), 300); }
+      return;
+    }
+    badPins.delete(pid);
     const token = String(m.token || '').slice(0, 64);
     const name = String(m.name || '').trim().slice(0, 30) || 'Player';
     if (!token) { log(`join request from ${short(pid)} without token – ignored`); return; }
     const rec = camp.players[token];
     log(`JOIN REQUEST from ${short(pid)} "${name}" token ${token.slice(0, 6)}…${rec ? ` (known: Player ${rec.num}${rec.banned ? ', BANNED' : ''})` : ' (new)'} – mode ${session.mode}`);
     if (rec?.banned) { log('-> denied (banned)'); return sendTo({ t: 'denied', reason: 'You are banned.' }, pid); }
-    for (const [oid, o] of peers) if (o.token === token && oid !== pid) { log(`dropping stale connection ${short(oid)} of the same player`); peers.delete(oid); }
+    for (const [oid, o] of peers) if (o.token === token && oid !== pid) { log(`dropping stale connection ${short(oid)} of the same player`); peers.delete(oid); dmPeer?.close(oid); }
     if (rec) {                                          // known player: re-admit, keep number
       rec.name = name; save();
+      const wasAlready = peers.get(pid)?.status === 'approved';
       peers.set(pid, { token, name, status: 'approved', num: rec.num });
       log(`-> re-admitted as Player ${rec.num}`);
-      sendAccepted(pid); systemMsg(`${name} (Player ${rec.num}) reconnected`); renderPeople(); broadcastRoster(); return;
+      sendAccepted(pid); if (!wasAlready) systemMsg(`${name} (Player ${rec.num}) reconnected`); renderPeople(); broadcastRoster(); return;
     }
+    if (peers.get(pid)?.status === 'pending') { log('-> still pending, re-sending "pending"'); return sendTo({ t: 'pending' }, pid); }
     if (session.mode === 'locked') { log('-> denied (session locked)'); return sendTo({ t: 'denied', reason: 'Session is locked.' }, pid); }
     peers.set(pid, { token, name, status: 'pending' });
     if (session.mode === 'open') { log('-> auto-approving (open mode)'); return approve(pid); }
@@ -391,10 +576,10 @@ function viewDM(cid) {
     log(`sending accepted + ${history.length} history message(s) to Player ${p.num}`);
     sendTo({ t: 'accepted', num: p.num, name: p.name, campaignName: camp.name, history, roster: roster() }, pid);
   };
-  function deny(pid) { log(`DENIED ${peers.get(pid)?.name}`); sendTo({ t: 'denied', reason: 'The DM declined your request.' }, pid); peers.delete(pid); renderPeople(); }
+  function deny(pid) { log(`DENIED ${peers.get(pid)?.name}`); sendTo({ t: 'denied', reason: 'The DM declined your request.' }, pid); peers.delete(pid); setTimeout(() => dmPeer?.close(pid), 300); renderPeople(); }
   function kick(token, ban) {
     const pid = [...peers].find(([, p]) => p.token === token)?.[0];
-    if (pid) { sendTo({ t: 'kicked', ban }, pid); peers.delete(pid); }
+    if (pid) { sendTo({ t: 'kicked', ban }, pid); peers.delete(pid); setTimeout(() => dmPeer?.close(pid), 300); }
     if (ban && camp.players[token]) { camp.players[token].banned = true; save(); }
     log(`${ban ? 'BANNED' : 'KICKED'} token ${token.slice(0, 6)}… (was ${pid ? 'online' : 'offline'})`); renderPeople(); broadcastRoster();
   }
@@ -436,8 +621,8 @@ function viewDM(cid) {
     h('div', { class: 'row' }, h('a', { href: '#/' }, '← Campaigns'), h('b', {}, `DM view: ${camp.name}`),
       h('button', { onclick: exportCampaign }, 'Export to file')),
     h('section', {}, h('h2', {}, 'Session'),
-      h('div', { class: 'row' }, 'Join mode:', modeSel, toggleBtn), h('div', { class: 'row' }, linkIn, copyBtn), qrEl,
-      h('div', { class: 'muted' }, 'Scan the QR code or open the link on a player device. Keep this tab open while playing. PeerJS only introduces the browsers; chat and game data use the direct WebRTC channel.')),
+      h('div', { class: 'row' }, 'Join mode:', modeSel, 'PIN:', pinIn, toggleBtn, sigEl), h('div', { class: 'row' }, linkIn, copyBtn), qrEl,
+      h('div', { class: 'muted' }, 'Players open the link, enter a name and this PIN. The link stays the same for the campaign; the PIN is per session. Keep this tab open and in the foreground while playing. PeerJS only introduces the browsers; chat and game data use the direct WebRTC channel.')),
     h('section', {}, h('h2', {}, 'TURN relay (optional) and relay test'),
       h('div', { class: 'row' }, turnUrls, turnUser, turnCred),
       h('div', { class: 'row' }, relayChk, 'Relay-only test: force all traffic through TURN (if this connects, TURN works; if not, TURN is unreachable). Applies to the next session you open.'),
@@ -447,66 +632,68 @@ function viewDM(cid) {
     h('section', {}, h('h2', {}, 'Chat (stored in this browser)'), chat.el),
     h('section', {}, h('h2', {}, 'Connection log'), logEl)
   );
-  cleanup = () => { conn?.leave(); conn = null; };
+  cleanup = () => { dmPeer?.destroy(); dmPeer = null; };
 }
 
 // ---------- PLAYER ----------
-function viewPlayer(sid, secret, opts = {}) {
-  let token = localStorage.getItem(LS_TOKEN);
+function viewPlayer(roomId, opts = {}) {
+  let token = sessionStorage.getItem(SS_TOKEN);
   const newToken = !token;
-  if (!token) { token = rid(24); localStorage.setItem(LS_TOKEN, token); }
-  const { el: logEl, log } = makeLog('Player', () => conn ? conn.status() : log('not connected yet'));
-  log(`link: DM host ${short(sid)}; identity token ${token.slice(0, 6)}… (${newToken ? 'new' : 'kept on this device'})`);
-  const statusEl = h('div', { class: 'status' }, 'Enter a name and join.');
+  if (!token) { token = rid(24); sessionStorage.setItem(SS_TOKEN, token); }
+  let peer = null, state = 'idle', joinTimer = null, wantJoin = false, t0 = 0;
+  const { el: logEl, log } = makeLog('Player', () => peer ? peer.status() : log('not connected yet'));
+  log(`link: room ${roomId}; identity token ${token.slice(0, 6)}… (${newToken ? 'new for this tab' : 'kept from earlier in this tab'})`);
+  const statusEl = h('div', { class: 'status' }, 'Enter your name and the PIN, then join.');
   const rosterEl = h('div', { class: 'muted' });
   const nameIn = h('input', { value: localStorage.getItem(LS_NAME) || '', placeholder: 'Your name', maxlength: '30' });
+  const pinIn = h('input', { placeholder: 'PIN', maxlength: '12', size: '8' });
   const joinBtn = h('button', { onclick: () => join() }, 'Join');
-  let conn = null, dmPid = null, state = 'idle', timer = null, left = false, t0 = 0;
-  const chat = makeChat(text => { if (state === 'accepted' && dmPid) conn.send({ t: 'chat', text }, dmPid); });
+  const chat = makeChat(text => { if (state === 'accepted') peer.send({ t: 'chat', text }); });
   chat.setEnabled(false);
 
   const setState = (s, text) => { if (s !== state) log(`state: ${state} -> ${s} | ${text}`); state = s; statusEl.textContent = text; chat.setEnabled(s === 'accepted'); };
-  const sendJoin = pid => { log('sending join request to ' + short(pid)); conn.send({ t: 'join', secret, token, name: nameIn.value.trim() || 'Player' }, pid); };
-  const leave = () => { left = true; conn?.leave(); };
+  const unlockForm = () => { joinBtn.disabled = nameIn.disabled = pinIn.disabled = false; };
+  const stopPeer = () => { clearTimeout(joinTimer); peer?.destroy(); peer = null; wantJoin = false; };
 
-  async function join() {
-    const name = nameIn.value.trim(); if (!name) { nameIn.focus(); return; }
-    localStorage.setItem(LS_NAME, name); joinBtn.disabled = nameIn.disabled = true; t0 = performance.now();
-    log(`Join clicked as "${name}"`);
-    setState('connecting', 'Connecting to the DM… (can take 5–20 s)');
-    try {
-      const c = await connectPeer(sid, {
-        log, turn: opts.turn, relayOnly: opts.relayOnly,
-        onJoin: pid => log('peer connected ' + short(pid)),
-        onLeave: pid => {
-          if (pid === dmPid && !left) { log('the DM peer disconnected'); dmPid = null; if (state === 'accepted' || state === 'pending') setState('connecting', 'DM disconnected. Waiting for the DM to come back…'); }
-          else log(`peer ${short(pid)} left (not the DM)`);
-        },
-        onMessage: (m, pid) => onMsg(m, pid),
-      });
-      if (left) { c.leave(); return; }
-      conn = c;
-      sendJoin(sid);
-    } catch (e) { log('COULD NOT START NETWORKING: ' + e.message); setState('error', 'Could not start networking: ' + e.message); return; }
-    timer = setTimeout(() => {
-      if (state === 'connecting') { log(`no DM answered after ${Math.round((performance.now() - t0) / 1000)} s – check relay states above / "Log status now"`); setState('connecting', 'No DM found yet. Is the session open and the link current? (still trying… see the log below)'); }
-    }, JOIN_TIMEOUT_MS);
+  function sendJoin() {
+    peer.send({ t: 'join', pin: pinIn.value.trim(), token, name: nameIn.value.trim() || 'Player' });
+    clearTimeout(joinTimer);
+    joinTimer = setTimeout(() => {
+      if (state === 'joining') { log(`no reply from the DM ${JOIN_REPLY_TIMEOUT_MS / 1000} s after the join request`); setState('joining', 'No response from the DM yet. Check that the session is open. Still waiting…'); }
+    }, JOIN_REPLY_TIMEOUT_MS);
   }
 
-  function onMsg(m, pid) {
-    if (!m || typeof m !== 'object') { log(`ignored malformed message from ${short(pid)}`); return; }
-    const handshake = ['pending', 'accepted', 'denied'].includes(m.t);
-    if (!handshake && pid !== dmPid) { log(`ignored "${m.t}" from ${short(pid)} (not the DM)`); return; }
-    if (dmPid && pid !== dmPid) { log(`ignored "${m.t}" from ${short(pid)} (DM is ${short(dmPid)})`); return; }
+  function join() {
+    const name = nameIn.value.trim(), pin = pinIn.value.trim();
+    if (!name) { nameIn.focus(); return; }
+    if (!pin) { pinIn.focus(); return; }
+    localStorage.setItem(LS_NAME, name); joinBtn.disabled = nameIn.disabled = pinIn.disabled = true; wantJoin = true; t0 = performance.now();
+    log(`Join clicked as "${name}"`);
+    if (peer?.isConnected()) { setState('joining', 'Asking the DM to let you in…'); sendJoin(); return; }
+    if (peer) return;
+    setState('connecting', 'Connecting to the DM… (retries automatically)');
+    peer = createPlayerPeer(roomId, {
+      log, turn: opts.turn, relayOnly: opts.relayOnly,
+      onConnect: () => { if (wantJoin) { setState('joining', 'Connected. Asking the DM to let you in…'); sendJoin(); } },
+      onDisconnect: () => { if (state === 'accepted' || state === 'pending') setState('connecting', 'Connection to the DM lost. Reconnecting…'); },
+      onReconnecting: (n, delay) => { if (['connecting', 'joining'].includes(state)) setState('connecting', `Could not reach the DM yet (retry ${n}, next try in ${Math.round(delay / 1000)} s). Is the session open? See the log.`); },
+      onMessage: m => onMsg(m),
+    });
+    peer.start();
+  }
+
+  function onMsg(m) {
+    if (!m || typeof m !== 'object') { log('ignored malformed message'); return; }
     switch (m.t) {
-      case 'pending': dmPid = pid; log(`DM identified: ${short(pid)}`); setState('pending', 'Waiting for the DM to approve you…'); break;
+      case 'pending': clearTimeout(joinTimer); setState('pending', 'Waiting for the DM to approve you…'); break;
       case 'accepted':
-        dmPid = pid; clearTimeout(timer); chat.clear(); (m.history || []).forEach(chat.add); renderRoster(m.roster);
+        clearTimeout(joinTimer); chat.clear(); (m.history || []).forEach(chat.add); renderRoster(m.roster);
         log(`ACCEPTED as Player ${m.num}; received ${(m.history || []).length} history message(s); ${Math.round((performance.now() - t0) / 1000)} s since Join`);
         setState('accepted', `Joined "${m.campaignName}" as Player ${m.num} (${m.name})`); break;
-      case 'denied': dmPid = pid; setState('denied', 'Not admitted: ' + (m.reason || 'denied')); leave(); break;
-      case 'kicked': setState('kicked', m.ban ? 'You were banned by the DM.' : 'You were kicked by the DM.'); leave(); break;
-      case 'closed': setState('closed', 'The DM closed the session.'); leave(); break;
+      case 'badpin': clearTimeout(joinTimer); setState('badpin', 'Wrong PIN. Check it and try again.'); unlockForm(); pinIn.focus(); break;
+      case 'denied': setState('denied', 'Not admitted: ' + (m.reason || 'denied')); stopPeer(); unlockForm(); break;
+      case 'kicked': setState('kicked', m.ban ? 'You were banned by the DM.' : 'You were kicked by the DM.'); stopPeer(); unlockForm(); break;
+      case 'closed': clearTimeout(joinTimer); setState('closed', 'The DM closed the session. Waiting for it to reopen (reconnecting automatically)…'); break;
       case 'chat': chat.add(m.msg); break;
       case 'roster': renderRoster(m.roster); log(`roster update: ${(m.roster || []).length} player(s)`); break;
       default: log(`unknown message type "${m.t}"`);
@@ -517,10 +704,15 @@ function viewPlayer(sid, secret, opts = {}) {
     rosterEl.textContent = 'In session: ' + r.map(p => `P${p.num} ${p.name}${p.online ? '' : ' (offline)'}`).join(', ');
   }
 
+  // as in the reference: retry when the tab comes back to the foreground (phone backgrounding) or the network returns
+  const onVisible = () => { if (document.visibilityState === 'visible' && peer && wantJoin) peer.reconnectNow('tab visible'); };
+  const onOnline = () => { if (peer && wantJoin) peer.reconnectNow('network online'); };
+  document.addEventListener('visibilitychange', onVisible); addEventListener('online', onOnline);
+
   $app.append(
-    h('section', {}, h('h2', {}, 'Join session'), h('div', { class: 'row' }, nameIn, joinBtn), statusEl, rosterEl),
+    h('section', {}, h('h2', {}, 'Join session'), h('div', { class: 'row' }, nameIn, pinIn, joinBtn), statusEl, rosterEl),
     h('section', {}, h('h2', {}, 'Chat'), chat.el),
     h('section', {}, h('h2', {}, 'Connection log'), logEl)
   );
-  cleanup = () => { clearTimeout(timer); leave(); };
+  cleanup = () => { document.removeEventListener('visibilitychange', onVisible); removeEventListener('online', onOnline); stopPeer(); };
 }

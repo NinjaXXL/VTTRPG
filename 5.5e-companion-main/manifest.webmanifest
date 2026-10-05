@@ -1,0 +1,14 @@
+{
+  "name": "5.5e Companion",
+  "short_name": "5.5e Companion",
+  "description": "A session companion for Dungeons & Dragons 5.5e.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1a1209",
+  "theme_color": "#1a1209",
+  "icons": [
+    { "src": "favicon-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "favicon-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
