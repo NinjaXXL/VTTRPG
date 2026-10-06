@@ -1,82 +1,34 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VTTRPG</title>
-
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      max-width: 760px;
-      margin: 2rem auto;
-      padding: 0 1rem;
-      line-height: 1.4;
-    }
-
-    section {
-      border: 1px solid #aaa;
-      border-radius: 8px;
-      padding: 1rem;
-      margin: 1rem 0;
-    }
-
-    button,
-    input {
-      font: inherit;
-      padding: .5rem;
-    }
-
-    input {
-      box-sizing: border-box;
-      width: 100%;
-    }
-
-    .row {
-      display: flex;
-      gap: .5rem;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .row input {
-      flex: 1;
-      min-width: 0;
-    }
-
-    #qr {
-      margin-top: 1rem;
-    }
-
-    #chat {
-      height: 18rem;
-      overflow: auto;
-      border: 1px solid #ccc;
-      padding: .5rem;
-      margin-bottom: .5rem;
-    }
-
-    .msg {
-      margin: .25rem 0;
-    }
-
-    .muted {
-      opacity: .65;
-    }
-
-    .status {
-      font-weight: 600;
-    }
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 1.5rem auto; padding: 0 1rem; line-height: 1.4; }
+    h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 0 0 .5rem; }
+    section { border: 1px solid #8887; border-radius: 8px; padding: .8rem 1rem; margin: .9rem 0; }
+    button, input, select { font: inherit; padding: .4rem .6rem; }
+    input { box-sizing: border-box; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
+    .row input:not([type]) { flex: 1; min-width: 8rem; }
+    input[readonly] { width: 100%; }
+    .chat { height: 16rem; overflow-y: auto; border: 1px solid #8886; border-radius: 4px; padding: .4rem; margin-bottom: .4rem; }
+    .msg .ts { opacity: .5; font-size: .8em; } .msg.sys { opacity: .65; font-style: italic; }
+    .log { height: 20rem; overflow-y: auto; font-size: .78rem; background: #8881; padding: .4rem; margin: .3rem 0 0; white-space: pre-wrap; word-break: break-word; }
+    .muted { opacity: .65; font-size: .9em; } .status { font-weight: 600; }
+    .tag { font-size: .78em; border: 1px solid #8888; border-radius: 4px; padding: 0 .4em; }
+    footer { margin: 2rem 0 1rem; text-align: center; border-top: 1px solid #8884; padding-top: .5rem; }
   </style>
 </head>
-
 <body>
-  <h1>VTTRPG</h1>
+  <h1>VTTRPG &ndash; connection test (Trystero)</h1>
+  <div id="app">Loading&hellip; (if this stays, open the browser console)</div>
+  <footer id="version" class="muted">version loads with the script</footer>
 
-  <div id="app"></div>
-
-  <script src="https://unpkg.com/peerjs@1/dist/peerjs.min.js"></script>
+  <!-- QR code library (global: QRCode.toCanvas) -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1/build/qrcode.min.js"></script>
-  <script src="./app.js?v=1"></script>
+  <!-- bump ?v= whenever app.js changes, otherwise browsers/Pages may serve the old file -->
+  <script type="module" src="./app.js?v=0.7.0"></script>
 </body>
 </html>
