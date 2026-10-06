@@ -11,7 +11,9 @@
     button, input, select { font: inherit; padding: .4rem .6rem; }
     input { box-sizing: border-box; }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .3rem 0; }
-    .row input:not([type]) { flex: 1; min-width: 8rem; }
+    .row input:not([type]), .row input[type=password] { flex: 1; min-width: 8rem; }
+    textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: .8rem; margin: .3rem 0; }
+    details { margin: .4rem 0; }
     input[readonly] { width: 100%; }
     .chat { height: 16rem; overflow-y: auto; border: 1px solid #8886; border-radius: 4px; padding: .4rem; margin-bottom: .4rem; }
     .msg .ts { opacity: .5; font-size: .8em; } .msg.sys { opacity: .65; font-style: italic; }
@@ -29,6 +31,6 @@
   <!-- QR code library (global: QRCode.toCanvas) -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1/build/qrcode.min.js"></script>
   <!-- bump ?v= whenever app.js changes, otherwise browsers/Pages may serve the old file -->
-  <script type="module" src="./app.js?v=0.7.0"></script>
+  <script type="module" src="./app.js?v=0.8.0"></script>
 </body>
 </html>

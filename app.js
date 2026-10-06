@@ -1,25 +1,30 @@
 // VTTRPG – minimal connection test on Trystero (two files: index.html + app.js)
 // DM = host in the browser. Players join via link / QR code and chat. Everything is logged.
+// TURN: Cloudflare Realtime TURN (free tier). The DM's browser mints short-lived credentials and puts them into the join link.
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.8.0';
 const TRYSTERO_VERSION = '0.26.0';               // pinned: the API changed a lot between releases
 const APP_ID = 'vttrpg-trystero-v1';             // namespaces the public signaling relays (not secret)
 const DEFAULT_STRATEGY = 'mqtt';                 // how peers find each other (signaling only, no chat data)
 const STRATEGIES = { mqtt: '@trystero-p2p/mqtt', torrent: '@trystero-p2p/torrent', nostr: '@trystero-p2p/nostr' };
 const CDNS = [p => `https://esm.run/${p}`, p => `https://esm.sh/${p}`];
 
-// ============================================================================
-// TURN – used AUTOMATICALLY by the DM and by every player (both load this same file).
-// Without a TURN relay, devices on networks that cannot reach each other directly will NOT connect.
-// Fill in ONE of the two. Anything here is readable by everyone who opens the page.
-// ============================================================================
-const TURN_SERVERS = [
-  // { urls: ['turn:YOUR_HOST:3478', 'turns:YOUR_HOST:443?transport=tcp'], username: 'USER', credential: 'PASSWORD' },
-];
-const TURN_FETCH_URL = '';   // alternative: a URL that returns such a list as JSON (e.g. the "credentials" URL of a TURN provider)
+// Optional static TURN servers for everyone (readable by anyone who opens the page). Normally leave empty.
+const TURN_SERVERS = [];   // e.g. [{ urls: ['turn:host:3478'], username: 'u', credential: 'p' }]
+
+// Cloudflare Realtime TURN
+const CF_API = 'https://rtc.live.cloudflare.com/v1/turn/keys';
+const CF_TTL_S = 86400;                          // credential lifetime (Cloudflare maximum is 48 h)
+const CF_MIN_LEFT_MS = 2 * 3600 * 1000;          // re-mint when less than 2 h are left
+const CF_TURN_URLS = [                           // from the Cloudflare docs (port 53 is blocked by browsers, so it is left out)
+  'turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:443?transport=udp',
+  'turn:turn.cloudflare.com:3478?transport=tcp', 'turn:turn.cloudflare.com:80?transport=tcp',
+  'turns:turn.cloudflare.com:5349?transport=tcp', 'turns:turn.cloudflare.com:443?transport=tcp'];
+const cfEntry = cf => ({ urls: CF_TURN_URLS, username: cf.username, credential: cf.credential });
 
 const LS_CAMPAIGNS = 'vttrpg:campaigns';
 const LS_NAME = 'vttrpg:playerName';
+const LS_CF = 'vttrpg:cloudflareTurn';           // DM only: { keyId, token, creds:{username,credential,ts,ttl} }
 const JOIN_HINT_MS = 25000;
 
 // ---------- helpers ----------
@@ -92,23 +97,69 @@ if (window.RTCPeerConnection && !window.__pcLogged) {
   };
 }
 
-// ---------- TURN resolution ----------
-async function resolveTurn(log) {
-  const list = [...TURN_SERVERS];
-  if (TURN_FETCH_URL) {
-    const t = performance.now(), ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 8000);
-    try {
-      const res = await fetch(TURN_FETCH_URL, { signal: ctl.signal });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json(), arr = Array.isArray(data) ? data : (data.iceServers || []);
-      list.push(...arr); log(`TURN credentials fetched: ${arr.length} entries in ${Math.round(performance.now() - t)} ms`);
-    } catch (e) { log('TURN fetch FAILED: ' + e.message); }
-    finally { clearTimeout(to); }
+// ---------- Cloudflare TURN ----------
+const loadCf = () => { try { return JSON.parse(localStorage.getItem(LS_CF)) || {}; } catch { return {}; } };
+const saveCf = s => localStorage.setItem(LS_CF, JSON.stringify(s));
+const credLeftMs = c => c ? c.ts + c.ttl * 1000 - Date.now() : -1;
+
+// asks Cloudflare for short-lived credentials (needs the TURN key ID + API token, which stay in the DM's browser)
+async function mintCloudflare(keyId, token, log) {
+  const t = performance.now();
+  log(`minting Cloudflare TURN credentials (ttl ${CF_TTL_S} s)…`);
+  let res;
+  try {
+    res = await fetch(`${CF_API}/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify({ ttl: CF_TTL_S }),
+    });
+  } catch (e) {
+    throw new Error(`request failed (${e.message}). Offline, or the browser blocked it (CORS). Workaround: create the credentials with the curl command from the README and paste the JSON.`);
   }
-  const servers = list.filter(s => s && s.urls && [].concat(s.urls).length);
-  const urls = servers.flatMap(s => [].concat(s.urls));
-  if (urls.some(u => /^turns?:/i.test(u))) log(`TURN configured: ${urls.filter(u => /^turns?:/i.test(u)).map(u => u.replace(/\?.*$/, '')).join(', ')}`);
-  else log('WARNING: no TURN server configured. Only direct connections can work (devices on different networks often fail). Set TURN_SERVERS or TURN_FETCH_URL at the top of app.js.');
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Cloudflare answered HTTP ${res.status}: ${text.slice(0, 200)}`);
+  const entry = parseCredentials(text);
+  log(`credentials minted in ${Math.round(performance.now() - t)} ms`);
+  return { ...entry, ts: Date.now(), ttl: CF_TTL_S };
+}
+
+// accepts the full JSON response (or a single entry); picks the entry that carries username + credential (the STUN entry has none)
+function parseCredentials(text) {
+  const j = JSON.parse(text), list = [].concat(j.iceServers || j);
+  const e = list.find(s => s && s.username && s.credential);
+  if (!e) throw new Error('no entry with username and credential found');
+  return { username: String(e.username), credential: String(e.credential) };
+}
+
+// returns valid credentials (stored or freshly minted) or null
+async function ensureCredentials(log) {
+  const st = loadCf();
+  if (st.creds && credLeftMs(st.creds) > CF_MIN_LEFT_MS) { log(`using stored Cloudflare TURN credentials (about ${(credLeftMs(st.creds) / 3600000).toFixed(1)} h left)`); return st.creds; }
+  if (st.keyId && st.token) {
+    try { st.creds = await mintCloudflare(st.keyId, st.token, log); saveCf(st); return st.creds; }
+    catch (e) { log('TURN minting FAILED: ' + e.message); }
+  } else log('no Cloudflare key ID / token saved in this browser');
+  if (st.creds && credLeftMs(st.creds) > 0) { log('falling back to the stored credentials that are about to expire'); return st.creds; }
+  return null;
+}
+
+// asks the TURN server for a relay address, without a second device
+function relayTest(servers, log) {
+  return new Promise(resolve => {
+    const pc = new RTCPeerConnection({ iceServers: servers, iceTransportPolicy: 'relay' });
+    pc.createDataChannel('turn-test');
+    let done = false, lastErr = '', timer = null;
+    const finish = (ok, msg) => { if (done) return; done = true; clearTimeout(timer); try { pc.close(); } catch { } log(`TURN test ${ok ? 'OK' : 'FAILED'}: ${msg}`); resolve({ ok, msg }); };
+    timer = setTimeout(() => finish(false, 'no relay address within 10 s' + (lastErr ? ` (last error: ${lastErr})` : '')), 10000);
+    pc.addEventListener('icecandidate', e => { if (e.candidate && / typ relay /.test(e.candidate.candidate)) finish(true, 'Cloudflare issued a relay address, so the credentials work'); });
+    pc.addEventListener('icecandidateerror', e => { lastErr = `${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`.trim(); });
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(e => finish(false, e.message));
+  });
+}
+
+function turnServersFor(cf, log) {
+  const servers = [...TURN_SERVERS];
+  if (cf) servers.push(cfEntry(cf));
+  if (servers.some(s => [].concat(s.urls).some(u => /^turns?:/i.test(u)))) log(`TURN configured: ${servers.flatMap(s => [].concat(s.urls)).filter(u => /^turns?:/i.test(u)).map(u => u.replace(/\?.*$/, '')).join(', ')}`);
+  else log('WARNING: no TURN configured. Only direct connections can work (devices on different networks often fail).');
   return servers;
 }
 
@@ -125,13 +176,13 @@ async function loadStrategy(name, log) {
 }
 
 // returns { send(data, targetPeerId?), status(), leave() }
-async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage }) {
+async function connect(strategy, roomId, secret, { log, onJoin, onLeave, onMessage, cf }) {
   const t0 = performance.now(), ms = () => Math.round(performance.now() - t0);
   let tx = 0, rx = 0;
   log(`env: online=${navigator.onLine} secureContext=${isSecureContext} RTCPeerConnection=${typeof RTCPeerConnection !== 'undefined'}`);
   log(`browser: ${navigator.userAgent}`);
   log(`strategy "${strategy}", Trystero ${TRYSTERO_VERSION}, room ${short(roomId)}`);
-  const turnConfig = await resolveTurn(log);
+  const turnConfig = turnServersFor(cf, log);
   const mod = await loadStrategy(strategy, log);
   log(`own peer id: ${short(mod.selfId)}`);
   const room = mod.joinRoom({ appId: APP_ID, password: secret, ...(turnConfig.length ? { turnConfig } : {}) }, roomId, {
@@ -221,10 +272,14 @@ const $app = document.getElementById('app');
 let cleanup = null;
 function route() {
   cleanup?.(); cleanup = null; activeLog = null; $app.replaceChildren();
-  const hash = location.hash.replace(/^#/, '') || '/';
+  const [path, query = ''] = (location.hash.replace(/^#/, '') || '/').split('?');
   let m;
-  if ((m = hash.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)(?:\.([a-z]+))?$/))) return viewPlayer(m[1], m[2], STRATEGIES[m[3]] ? m[3] : DEFAULT_STRATEGY);
-  if ((m = hash.match(/^\/dm\/([a-z0-9]+)$/))) return viewDM(m[1]);
+  if ((m = path.match(/^\/join\/([a-z0-9]+)\.([a-z0-9]+)(?:\.([a-z]+))?$/))) {
+    const [u, c] = (new URLSearchParams(query).get('t') || '').split('.');   // Cloudflare TURN credentials from the link
+    const cf = u && c && /^[\w-]+$/.test(u) && /^[\w-]+$/.test(c) ? { username: u, credential: c } : null;
+    return viewPlayer(m[1], m[2], STRATEGIES[m[3]] ? m[3] : DEFAULT_STRATEGY, cf);
+  }
+  if ((m = path.match(/^\/dm\/([a-z0-9]+)$/))) return viewDM(m[1]);
   viewHome();
 }
 addEventListener('hashchange', route);
@@ -271,14 +326,44 @@ function viewDM(cid) {
   let conn = null, busy = false;
   const peers = new Map();   // peerId -> { name }
 
+  // --- session controls ---
   const stratSel = h('select', {}, ...Object.keys(STRATEGIES).map(k => h('option', { value: k }, k + (k === DEFAULT_STRATEGY ? ' (default)' : ''))));
   stratSel.value = DEFAULT_STRATEGY;
   const toggleBtn = h('button', { onclick: () => conn ? stopSession() : startSession() }, 'Start session');
   const stateEl = h('span', { class: 'tag' }, 'stopped');
   const linkIn = h('input', { readonly: '', placeholder: 'Start the session to get the link' });
   const copyBtn = h('button', { onclick: () => { linkIn.select(); navigator.clipboard?.writeText(linkIn.value); log('join link copied'); } }, 'Copy link');
-  const qrCanvas = h('canvas'); qrCanvas.style.display = 'none';
+  const qrCanvas = h('canvas'); qrCanvas.style.display = 'none'; qrCanvas.style.maxWidth = '100%';
   const playersEl = h('div', { class: 'muted' }, 'No players connected.');
+
+  // --- Cloudflare TURN controls ---
+  const st0 = loadCf();
+  const cfKeyIn = h('input', { placeholder: 'TURN key ID', value: st0.keyId || '' });
+  const cfTokenIn = h('input', { type: 'password', placeholder: 'TURN API token', value: st0.token || '' });
+  const cfPaste = h('textarea', { rows: '4', placeholder: 'Paste the JSON printed by the curl command (see README)' });
+  const cfStatus = h('div', { class: 'muted' });
+  const showCf = () => {
+    const c = loadCf().creds, left = credLeftMs(c);
+    cfStatus.textContent = !c ? 'No TURN credentials yet.' : left > 0 ? `TURN credentials valid for about ${(left / 3600000).toFixed(1)} more hours.` : 'Stored TURN credentials have expired.';
+  };
+  const testCreds = async creds => {
+    cfStatus.textContent = 'testing the relay… (up to 10 s)';
+    const r = await relayTest([cfEntry(creds)], log);
+    showCf(); cfStatus.textContent += ` Relay test ${r.ok ? 'OK' : 'FAILED'}: ${r.msg}.`;
+  };
+  const cfSaveAndTest = async () => {
+    const st = loadCf(); st.keyId = cfKeyIn.value.trim(); st.token = cfTokenIn.value.trim(); saveCf(st);
+    if (!st.keyId || !st.token) { cfStatus.textContent = 'Enter the TURN key ID and the API token.'; return; }
+    cfStatus.textContent = 'asking Cloudflare for credentials…';
+    try { st.creds = await mintCloudflare(st.keyId, st.token, log); saveCf(st); }
+    catch (e) { log('TURN minting FAILED: ' + e.message); cfStatus.textContent = 'FAILED: ' + e.message; return; }
+    await testCreds(st.creds);
+  };
+  const cfUsePasted = async () => {
+    try { const st = loadCf(); st.creds = { ...parseCredentials(cfPaste.value), ts: Date.now(), ttl: CF_TTL_S }; saveCf(st); log('pasted TURN credentials stored'); await testCreds(st.creds); }
+    catch (e) { cfStatus.textContent = 'Could not read the pasted JSON: ' + e.message; }
+  };
+  showCf();
 
   const sendTo = (data, pid) => conn?.send(data, pid);
   const joined = () => [...peers.keys()];
@@ -291,17 +376,20 @@ function viewDM(cid) {
     busy = true; toggleBtn.disabled = stratSel.disabled = true; stateEl.textContent = 'starting…';
     const strategy = stratSel.value;
     log(`starting session with strategy ${strategy}`);
+    const cf = await ensureCredentials(log);
+    showCf();
     try {
       conn = await connect(strategy, camp.roomId, camp.secret, {
-        log,
+        log, cf,
         onJoin: pid => log(`player peer ${short(pid)} connected, waiting for its join message`),
         onLeave: pid => { const p = peers.get(pid); if (p) { peers.delete(pid); log(`${p.name} left`); systemMsg(`${p.name} left`); renderPlayers(); broadcastRoster(); } },
         onMessage: onMsg,
       });
     } catch (e) { log('COULD NOT START SESSION: ' + e.message); busy = false; toggleBtn.disabled = stratSel.disabled = false; stateEl.textContent = 'failed'; return; }
-    const link = `${location.href.split('#')[0]}#/join/${camp.roomId}.${camp.secret}.${strategy}`;
+    const link = `${location.href.split('#')[0]}#/join/${camp.roomId}.${camp.secret}.${strategy}${cf ? `?t=${cf.username}.${cf.credential}` : ''}`;
     linkIn.value = link;
-    if (window.QRCode) QRCode.toCanvas(qrCanvas, link, { width: 240, margin: 2 }, err => { if (err) log('QR error: ' + err.message); else { qrCanvas.style.display = ''; log('QR code drawn'); } });
+    log(`join link: ${link.length} characters${cf ? ' (contains short-lived TURN credentials)' : ' (no TURN credentials)'}`);
+    if (window.QRCode) QRCode.toCanvas(qrCanvas, link, { width: 320, margin: 2 }, err => { if (err) log('QR error: ' + err.message); else { qrCanvas.style.display = ''; log('QR code drawn'); } });
     else log('QR library not loaded – use the link');
     busy = false; toggleBtn.disabled = false; toggleBtn.textContent = 'Stop session'; stateEl.textContent = 'running'; chat.setEnabled(true);
     log('SESSION RUNNING – share the link or QR code. Keep this tab open and in the foreground.');
@@ -343,10 +431,15 @@ function viewDM(cid) {
 
   $app.append(
     h('div', { class: 'row' }, h('a', { href: '#/' }, '← Campaigns'), h('b', {}, `DM: ${camp.name}`)),
+    h('section', {}, h('h2', {}, 'TURN relay (Cloudflare, free tier)'),
+      h('div', { class: 'row' }, cfKeyIn, cfTokenIn, h('button', { onclick: cfSaveAndTest }, 'Save & test')),
+      h('details', {}, h('summary', {}, 'or paste credentials created with curl'), cfPaste, h('div', { class: 'row' }, h('button', { onclick: cfUsePasted }, 'Use pasted credentials'))),
+      cfStatus,
+      h('div', { class: 'muted' }, 'Key ID and token stay in this browser only. When you start a session, short-lived credentials are created and put into the join link, so players use the relay automatically.')),
     h('section', {}, h('h2', {}, 'Session'),
       h('div', { class: 'row' }, 'Signaling:', stratSel, toggleBtn, stateEl),
       h('div', { class: 'row' }, linkIn, copyBtn), qrCanvas, playersEl,
-      h('div', { class: 'muted' }, 'The link stays the same for this campaign. Anyone with the link can join, so share it only with your players.')),
+      h('div', { class: 'muted' }, 'Anyone with the link can join (and use its TURN credentials until they expire), so share it only with your players.')),
     h('section', {}, h('h2', {}, 'Chat (stored in this browser)'), chat.el),
     h('section', {}, h('h2', {}, 'Connection log'), logEl)
   );
@@ -354,9 +447,9 @@ function viewDM(cid) {
 }
 
 // ---------- PLAYER ----------
-function viewPlayer(roomId, secret, strategy) {
+function viewPlayer(roomId, secret, strategy, cf) {
   const { el: logEl, log } = makeLog('Player', () => conn ? conn.status() : log('not connected yet'));
-  log(`link: room ${short(roomId)}, strategy ${strategy}`);
+  log(`link: room ${short(roomId)}, strategy ${strategy}, TURN credentials in link: ${cf ? 'yes' : 'NO'}`);
   const statusEl = h('div', { class: 'status' }, 'Enter your name and join.');
   const rosterEl = h('div', { class: 'muted' });
   const nameIn = h('input', { value: localStorage.getItem(LS_NAME) || '', placeholder: 'Your name', maxlength: '30' });
@@ -376,7 +469,7 @@ function viewPlayer(roomId, secret, strategy) {
     setState('connecting', 'Looking for the DM… (can take 5–20 s)');
     try {
       const c = await connect(strategy, roomId, secret, {
-        log,
+        log, cf,
         onJoin: pid => { if (!conn) queued.push(pid); else if (!dmPid) sendJoin(pid); },
         onLeave: pid => { if (pid === dmPid) { dmPid = null; log('the DM disconnected'); setState('connecting', 'DM disconnected. Waiting for it to come back…'); } },
         onMessage: onMsg,
